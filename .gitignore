@@ -23,6 +23,7 @@ venv/
 
 # --- Java / Maven ---
 target/
+out/
 *.class
 *.jar
 !.mvn/wrapper/maven-wrapper.jar
