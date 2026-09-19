@@ -11,9 +11,12 @@
 - [ ] 根 README 占位已建；`.gitignore`（含 `.env`、`*.db`、`trace/*.jsonl`）
 - [ ] 全程 request_id 幂等语义在 mock-oa 一个写端点落地（重复请求返回原结果）
 
-## 前置
-- 装 Maven：`scoop install maven`（D:\scoop 已存在；装完 `mvn -version` 验证）
-- DeepSeek key：本轮不涉及（冒烟无 LLM 调用）；M2 起复用 `~/AppData/Local/hermes/.env` 的 DEEPSEEK_API_KEY，写入 python-service/.env（gitignore）
+## 前置（环境已就绪，2026-09-04 由 Hermes 配置）
+- **Maven 3.9.9 已装**：`D:\software\maven-dist\apache-maven-3.9.9`，已加入用户 PATH；`JAVA_HOME=C:\Program Files\Java\jdk-21` 已持久化。新终端里 `mvn -v` 应可用（老进程可先用全路径）。
+- **依赖源**：`~/.m2/settings.xml` 已配 aliyun 镜像（central → `http://maven.aliyun.com/nexus/content/groups/public/`）；本地 `.m2` 已有约 2GB 缓存（含 Spring Boot）。
+- **不要用 start.spring.io**（本机不可达）：手写最小 `pom.xml`。建议坐标：parent `spring-boot-starter-parent`（3.5.x 或缓存中已有版本）、`spring-boot-starter-web`、`spring-boot-starter-jdbc`、`org.xerial:sqlite-jdbc`、`org.springdoc:springdoc-openapi-starter-webmvc-ui`、`spring-boot-starter-test`。
+- **网络铁律**：外网请求**不要走系统代理**（代理下 TLS 握手失败）；直连国内镜像并给 curl 加 `--ssl-no-revoke -4`。
+- DeepSeek key：本轮不涉及（冒烟无 LLM 调用）；M2 起复用 `~/AppData/Local/hermes/.env` 的 DEEPSEEK_API_KEY，写入 python-service/.env（已 gitignore）。
 
 ## 分工与顺序
 1. （Hermes）确认契约字段 → 2. （dsh）Java 骨架 + mock-oa + springdoc → 3. （dsh）Python client + 透传断言 → 4. （用户）review + 合入 + 录屏留档
