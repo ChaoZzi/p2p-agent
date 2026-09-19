@@ -1,0 +1,35 @@
+# --- 环境与密钥 ---
+.env
+*.env
+!.env.example
+
+# --- 数据库（运行期产物，不入库） ---
+*.db
+*.db-wal
+*.db-shm
+
+# --- trace / 日志 ---
+trace/*.jsonl
+logs/
+*.log
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# --- Java / Maven ---
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# --- IDE / 系统 ---
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
