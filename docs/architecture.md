@@ -1,6 +1,7 @@
-# 架构 v0.2 — P2P Agent 双语言服务设计（方案 C）
+# 架构 v0.3 — P2P Agent 双语言服务设计（方案 C）
 
-> 配套 `PRD.md` v0.2。本文是**契约先行**的落地依据：先定边界与契约，再写代码。
+> 配套 `PRD.md` v0.3。本文是**契约先行**的落地依据：先定边界与契约，再写代码。
+> v0.3 变更：§2.3 数据边界改为**存储双 profile**（SQLite 默认 / PostgreSQL 16 可选），SQL 只写两边通用子集。
 
 ## 1. 仓库骨架（P0 结束后形态）
 
@@ -61,8 +62,16 @@ p2p-agent/
 
 Python :8001：`POST /api/chat`（自然语言→对话式执行）、`GET /api/flows/{id}`（透传）、`GET /api/eval/run`、静态演示页 `/`。
 
-### 2.3 数据边界（不共享库）
-- Java 持 `flows.db`（状态/审计/幂等，WAL）。表：`flow`、`flow_step`、`audit_log`、`idempotency`。
+### 2.3 数据边界（不共享库）— v0.3 存储双 profile
+- **DB 抽象层**：一套 DAO/SQL 跑两个后端，由 Spring profile 选择，**SQL 只写两边通用子集**（关键子集：`INSERT ... ON CONFLICT (<key>) DO NOTHING`，SQLite 3.24+ 与 PG 都支持）。
+  - `sqlite`（**默认**）：零依赖，`java-service/data/*.db` + WAL。表：`flow`、`flow_step`、`audit_log`、`idempotency`。
+  - `postgres`（**可选**）：本机 PostgreSQL 16（`postgresql-x64-16`，:5432，scram 认证）。用于演示并发写、行锁、JSONB、权限级 append-only。
+  - schema 分文件：`schema-sqlite.sql` / `schema-postgres.sql`，由 `spring.sql.init.platform` 选择（Spring Boot 原生支持 `schema-${platform}.sql`）。
+  - 连接池：SQLite 强制 `maximum-pool-size=1`（单写者，串行换确定性）；PG 放开到 10 并显式说明。
+- **凭据**：仓库里只有 `${PG_USER}` / `${PG_PASSWORD}` 占位；真实值走环境变量或本地未提交的 `application-postgres-local.properties`（已被 `.gitignore` 覆盖）。**任何真实密码不得入库**（含 commit 历史）。
+- **审计 append-only 的强度分级**（面试可讲）：
+  - SQLite：靠代码约束（只 `INSERT`，无 UPDATE/DELETE 语句）；
+  - PG：可做到**权限级**（`REVOKE UPDATE, DELETE ON audit_log FROM <app_role>`）甚至双角色（migration 角色建表 / app 角色只 `INSERT,SELECT`）→ 越权改审计会**被数据库拒绝**，不只是"代码里没写"。
 - Python trace 落 `trace/*.jsonl`（独立），按 `trace_id` 与审计对账。
 - 状态字段由 Java 权威定义；Python 只读视图经 API，不直连库。
 

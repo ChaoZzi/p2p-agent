@@ -1,9 +1,9 @@
-# PRD v0.2 — P2P Agent：跨系统「采购到付款」流程执行型数字员工（Java + Python 双语言版）
+# PRD v0.3 — P2P Agent：跨系统「采购到付款」流程执行型数字员工（Java + Python 双语言版）
 
 | 项 | 内容 |
 |---|---|
-| 版本 | **v0.2**（2026-09-04，吸收 DeepSeek harness 交叉评审） |
-| 变更 | v0.1 纯 Python → 方案 C 双语言；里程碑 P0/P1/P2 重排；叙事对齐招聘语言与应届身份 |
+| 版本 | **v0.3**（2026-09-22，存储决策定案） |
+| 变更 | v0.1 纯 Python → v0.2 方案 C 双语言、里程碑重排 → **v0.3 存储从"仅 SQLite"改为双 profile（SQLite 默认 / PostgreSQL 16 可选），SQL 只写两边通用子集** |
 | 评审依据 | `docs/评审报告-面试项目评估.md`（dsh 产出，含 8+ 真实 JD 证据链接） |
 | 目录 | `D:\Projects\interview-project\p2p-agent` |
 
@@ -19,7 +19,7 @@
 
 | JD 词 | 本项目实体 |
 |---|---|
-| 工作流编排 / 状态机控制 | 流程执行引擎（Java）：步骤状态机、SQLite 持久化 |
+| 工作流编排 / 状态机控制 | 流程执行引擎（Java）：步骤状态机、状态持久化（SQLite 默认 / PG 可选） |
 | 失败恢复 / 重试 | 指数退避重试、补偿（预算锁定失败→解锁） |
 | 审批中断 / HITL | PENDING_APPROVAL / PENDING_PAYMENT 节点 suspend/resume |
 | 运行回放 / 链路追踪 | trace_id 全链路透传 + 审计流水 + 回放 API |
@@ -50,13 +50,13 @@
                │ request_id / trace_id 全链路透传
 ┌──────────────▼──────────────────────────────────────┐
 │ Java 服务 :8000（企业侧 · Spring Boot 3 / JDK21）     │
-│  流程执行引擎: 状态机(SQLite) · 幂等 · 补偿 · 超时重试 │
+│  流程执行引擎: 状态机(SQLite/PG) · 幂等 · 补偿 · 超时重试│
 │  HITL 审批(suspend/resume/驳回修订) · append-only审计  │
 │  权限分级 · 错误码语义                                │
 │  Mock 企业系统 ×3: mock-oa / mock-finance / mock-scm  │
 │  (故障注入开关: 超时/500/重复请求)                    │
 └─────────────────────────────────────────────────────┘
-数据边界: Java 持 flows/audit(SQLite, WAL)；Python trace 落独立 JSONL/小库，按 trace_id 关联。不共享库文件。
+数据边界: Java 持 flows/audit（默认 SQLite+WAL，可切 PostgreSQL 16）；Python trace 落独立 JSONL/小库，按 trace_id 关联。不共享库文件。
 ```
 
 职责与面试话术：**"确定性的资金流程（状态机/幂等/审计）交给 Java 后端工程；不确定性的模型决策（意图/澄清/异常建议）交给 Python AI 生态"** ——与智联/阿里云 JD 把 Agent 运行时拆成"确定性工程 + AI 工程"的组织方式一致。
@@ -82,10 +82,10 @@
 | 决策 | 选择 | 理由（面试可讲） |
 |---|---|---|
 | Python 主干 | 3.11 + FastAPI + uv + Pydantic | Agent 生态；结构化输出校验 |
-| Java 企业侧 | Spring Boot 3 + JDK 21 + sqlite-jdbc（WAL） | 状态机/事务/审计是 Java 主场 |
+| Java 企业侧 | Spring Boot 3 + JDK 21 + JDBC（sqlite-jdbc 默认 / PostgreSQL 16 可选） | 状态机/事务/审计是 Java 主场；**一套 DAO 两个后端，profile 切换** |
 | 不用 Activiti/Flowable/Spring AI | 自研轻量状态机 | 主干可审计可回滚可测试；Spring AI 是社招 JD 词，应届不引真依赖 |
 | 不用 LangGraph/CrewAI | 自研薄 harness（几百行） | "我写过 loop"；对照实验留认知卡 |
-| 存储 | Java: SQLite（抽象可换 PG）；Python: JSONL trace | 见 §4 数据边界 |
+| 存储 | Java：**SQLite（默认，零依赖演示）+ PostgreSQL 16（可选，演示并发写/JSONB/审计防篡改）**，`spring.profiles.active` 切换；SQL 只写两边通用子集（`ON CONFLICT ... DO NOTHING`）；Python：JSONL trace | 见 §4 数据边界、architecture §2.3 |
 | 模型 | DeepSeek v4-flash / v4-pro 路由 | 成本杠杆；key 复用 Hermes .env（不入库，.env + .gitignore） |
 
 ## 8. FAQ（README/面试防御）
@@ -93,10 +93,19 @@
 - **为什么不用 RAG？** P2P 是动作执行场景，决策信息在结构化单据里，不需要非结构化知识检索；扩展点=供应商知识库查询工具。
 - **为什么不用现成工作流引擎/框架？** 花钱动作不交给黑盒；自研换可审计/可回滚/可测试；已做主流方案认知对照。
 - **为什么 Java + Python 两门语言？** 与 JD 的运行时拆分类似：确定性工程 vs AI 工程，各用最合适的语言；跨语言可观测性（trace_id）本身就是加分叙事。
+- **为什么两套存储（v0.3 新增）？** 不是"选不出来"而是刻意分层：**SQLite = 零依赖可复现**（clone 即跑、面试现场两条命令就能演、CI 无外部依赖），**PG = 生产级能力**（并发写/行锁/JSONB/权限级 append-only 审计）。同一套 DAO 用 `spring.profiles.active` 切换、SQL 只写两边通用子集，代价是两份很小的 schema 文件；收益是"数据层没有耦合到具体数据库"这件事能被跑出来证明，而不是嘴上说。
 - **多 Agent？** P2 加分项；当前单 Agent + 确定性引擎已覆盖流程执行场景，多 Agent 的上下文/成本开销在此不划算。
 
-## 9. 面试三维表达（v0.2 版）
+## 9. 面试三维表达（v0.3 版）
 
-- **架构**：Java 流程引擎（状态机/幂等/补偿/HITL/审计/权限）+ Python 自研 Harness（loop/类 MCP 工具注册/模型路由）+ OpenAPI 契约 + trace_id 贯穿
+- **架构**：Java 流程引擎（状态机/幂等/补偿/HITL/审计/权限）+ Python 自研 Harness（loop/类 MCP 工具注册/模型路由）+ OpenAPI 契约 + trace_id 贯穿 + 存储双 profile
 - **业务**：自然语言发起 P2P → 预算校验 → 审批 → 下单 → 验收 → 付款，含澄清/驳回修订/预算不足/故障恢复
 - **结果**：P1 实测：通过率 X% / 自动化率 X% / 成本降 X% / 恢复率 X%（未测不写）
+
+## 10. 变更记录
+
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| v0.3 | 2026-09-22 | 存储改为双 profile（SQLite 默认 + PostgreSQL 16 可选）；SQL 取两边通用子集；PostgreSQL 侧用 schema 分文件 + 权限级 append-only；新增 §8 FAQ 一条 |
+| v0.2 | 2026-09-04 | 纯 Python → 方案 C 双语言；里程碑 P0/P1/P2 重排；叙事对齐招聘语言与应届身份 |
+| v0.1 | — | 初版纯 Python 方案 |

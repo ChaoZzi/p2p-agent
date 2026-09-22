@@ -23,3 +23,8 @@
 
 ## 失败预案
 任一步卡壳 > 2 天 → 按 PRD §4 降级：Java 侧砍到只剩 mock-oa + 审计最小实现，主链路先 Python 内直连。
+
+## 变更说明（2026-09-22，卡版本 v1.0 → v1.1）
+- 本卡按 v1.0 以 **SQLite 单后端**交付，已通过 Hermes 独立审核（21 项断言 + 库/日志双向核对）。
+- **PRD v0.3 起存储改为双 profile**（SQLite 默认 + PostgreSQL 16 可选）。本卡的已交付代码**不返工**：该改造作为 `P0-02-min-loop.md §0 前置改造` 执行（独立 commit），验收 = 本卡 7 条 + 21 项断言在 sqlite 与 postgres 两个 profile 下**都**通过。
+- 影响面：`pom.xml` / `application*.properties` / `schema.sql` 拆分 / `ApprovalService` 的两条 SQL；不动契约与端点。

@@ -4,6 +4,30 @@
 > 目标：**最简但每个架构层都真实存在的纵向切片**。做完这张卡，你能指着每一层说"它干什么、为什么在这"。
 > 本卡刻意砍掉：预算校验、下单/付款、补偿、驳回修订、评测——都留到 P0-03+，防止最小系统变重。
 
+## 0. 前置改造（P0-02 第一步，独立 commit，[dsh写+讲]）
+
+**背景**：PRD v0.3 把存储定为**双 profile**（SQLite 默认 + PostgreSQL 16 可选）。P0-01 交付时只有 SQLite，本卡动工前先把这层地基铺好，否则 4 张业务表建完再改就要重做一批 DAO。
+
+**要做什么**
+| 文件 | 改动 |
+|---|---|
+| `java-service/pom.xml` | 加 `org.postgresql:postgresql`（版本交给 Boot BOM，别写死） |
+| `src/main/resources/application.properties` | 保留 sqlite 为默认；把共用项抽出；显式 `spring.profiles.default=sqlite` |
+| `src/main/resources/application-sqlite.properties` / `application-postgres.properties` | 分开：URL/驱动/连接池（sqlite=1，pg=10）；PG 用 `${PG_USER}` `${PG_PASSWORD}` `${PG_URL:jdbc:postgresql://127.0.0.1:5432/p2p_agent}` 占位 |
+| `src/main/resources/schema.sql` → 拆成 `schema-sqlite.sql` + `schema-postgres.sql` | 用 `spring.sql.init.platform` 选择；两版 DDL 都要**幂等**（`IF NOT EXISTS`） |
+| `service/ApprovalService.java` | 两条 SQL 改为两边通用写法（`ON CONFLICT(request_id) DO NOTHING`），去掉 SQLite 专有的 `INSERT OR IGNORE` |
+| `docs/task-cards/P0-02-讲解.md` | 记录 profile 机制、SQL 可移植子集的边界、PG 侧 append-only 的做法 |
+
+**验收（全部要实测证据）**
+- [ ] **默认（sqlite）行为与 P0-01 完全一致**：P0-01 的 7 条验收 + 21 项断言原样全过（回归）
+- [ ] `--spring.profiles.active=postgres` 起服务后，同样的断言在 **PG 16** 上全过，且库里同 request_id 只有 1 行
+- [ ] **5 并发同 request_id 在 PG 上也只建 1 行**（并发写是 PG 相对 SQLite 的真实能力，必须验到）
+- [ ] `spring.sql.init.platform` 生效证明：两个 profile 分别起服务后，各自库里的表结构由对应 `schema-*.sql` 建出（贴 DDL 或 `\d` 输出）
+- [ ] **凭据卫生**：`git grep` 搜不到任何真实密码；仓库内只有占位符；`application-postgres-local.properties` 已被 gitignore（给 `git check-ignore -v` 证据）
+- [ ] 讲清"为什么两份 schema"与"通用 SQL 子集到哪为止"（面试会追问：再复杂点怎么办 → 答：P1 若 SQL 分化加剧，改 Flyway 按 dialect 管迁移）
+
+**PG 侧准备（一次性，用户自己做，见 `scripts/pg-init.sql`）**：建最小权限角色 + 库，密码由你输入、不入库。
+
 ## 1. 业务故事（演示脚本）
 > 页面输入："我想申请采购 1 台 MacBook Pro，给新来的前端用"
 → Agent 抽取意图=采购申请 + 参数（item=MacBook Pro, qty=1, reason=给新来的前端用），缺 costCenter → **反问一次**
