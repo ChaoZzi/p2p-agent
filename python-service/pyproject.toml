@@ -1,0 +1,16 @@
+[project]
+name = "p2p-agent-python-service"
+version = "0.1.0"
+description = "P2P Agent Python 侧（Agent Harness + 企业系统工具客户端）；P0-01 只有 mock-oa 客户端"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+]
+
+# 说明：本目录不是要发布的库，不写 [build-system]——
+# uv 会把它当"虚拟工程"（只装依赖、不装自身），省掉一层打包配置。
