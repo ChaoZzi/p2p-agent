@@ -79,8 +79,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
 | `trace/tracer.py` | `record(trace_id, step, payload) -> None`：写 `trace/<trace_id>.jsonl`（一行一个 JSON） |
 | `tools/flow_client.py` | Java 契约客户端：`create_flow / get_flow / approve / reject / get_audit`，自动带 `X-Trace-Id` 与 `X-Request-Id`；**沿用 P0-01 `oa_client.py` 的 trace 回显断言写法** |
 
-### A4. 顺手修（独立 commit 或并入 A2）
-`MockOaApplication.main` 现在无条件建 `data/` 目录 → 改为**仅 sqlite profile 建**（PG profile 下多一个空目录，无害但脏）。
+### A4. 两处机械改动（独立 commit）
+1. **启动类上移到扫描根（重要）**：`MockOaApplication` 现在在 `com.p2pagent.mockoa`，而 `@SpringBootApplication` 只扫描**它自己所在包及子包** → 用户阶段 B 写的 `com.p2pagent.engine.*`（`@Service`）**根本不会被扫到**，症状是启动后报 "no qualifying bean"。做法：把类移到 `java-service/src/main/java/com/p2pagent/MockOaApplication.java`（包名 `com.p2pagent`）；IDEA 里 `Refactor → Move` 会连带更新引用。**注意保留** `java-service/data` 目录创建的既有行为（见下条）。
+2. **`data/` 目录创建改成仅 sqlite profile**：现在无条件建（PG profile 下留一个空目录，无害但脏）。
+   - 验收：PG profile 启动后 `java-service/data/` 不被创建；sqlite profile 启动后行为与现在一致。
 
 ## 3. 契约要点（钉死，别自创）
 
