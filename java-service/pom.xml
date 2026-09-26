@@ -4,8 +4,9 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <!-- P0-01：mock-oa 冒烟服务。手写 pom（start.spring.io 本机不可达）。
-         版本基线来自 docs/task-cards/P0-01-dsh-brief.md §2，不要自创版本。 -->
+    <!-- mock-oa 冒烟服务。手写 pom（start.spring.io 本机不可达）。
+         版本基线来自 docs/task-cards/P0-01-dsh-brief.md §2，不要自创版本。
+         P0-02 §0 起支持双存储 profile：sqlite（默认）/ postgres。 -->
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
@@ -17,7 +18,7 @@
     <artifactId>mock-oa</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>mock-oa</name>
-    <description>P2P Agent P0-01: mock OA system (contract / trace propagation / idempotency / fault switch)</description>
+    <description>P2P Agent mock OA system (contract / trace propagation / idempotency / fault switch; storage profiles: sqlite, postgres)</description>
 
     <properties>
         <!-- 必须 21：javac 的 release 开关同时锁死语言级别与 JDK API（设成 17 会屏蔽 Thread.ofVirtual 等） -->
@@ -39,6 +40,13 @@
             <groupId>org.xerial</groupId>
             <artifactId>sqlite-jdbc</artifactId>
             <version>${sqlite-jdbc.version}</version>
+        </dependency>
+        <!-- PostgreSQL 驱动：版本交给 spring-boot-starter-parent 的 BOM 管，不写死 -->
+        <!-- scope=runtime：编译期代码不会直接引用 org.postgresql.*（连接由 DriverManager 按 URL 解析） -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
         </dependency>
         <dependency>
             <groupId>org.springdoc</groupId>

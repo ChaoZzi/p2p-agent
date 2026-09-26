@@ -19,25 +19,39 @@ import org.springframework.stereotype.Service;
 /**
  * 审批创建 + request_id 幂等（P0-01 唯一一个"写"业务）。
  *
- * <p>幂等落库策略：{@code INSERT OR IGNORE} + {@code SELECT} 回读。
+ * <p>幂等落库策略：{@code INSERT ... ON CONFLICT(request_id) DO NOTHING} + {@code SELECT} 回读。
  * 为什么不先 SELECT 再 INSERT：那是 check-then-act，两个并发同 request_id 的请求
  * 可以同时查到"不存在"，然后都去插 —— 靠数据库唯一键兜底才是真幂等。
- * 为什么不用 {@code INSERT ... ON CONFLICT DO UPDATE ... RETURNING}：SQLite 的
- * RETURNING 拿不到"这一行原本是谁写的"，我们还需要区分首次/重复，简单两段式更清楚。
+ * 为什么不用 {@code INSERT ... ON CONFLICT DO UPDATE ... RETURNING}：我们不仅要"唯一"，
+ * 还要区分这次到底是首次还是重复（首次 dedup=false、日志也不同），两段式更直白。
+ *
+ * <p><b>P0-02 §0 改动</b>：原写法 {@code INSERT OR IGNORE} 是 SQLite 专有语法，
+ * 换成 SQL 标准里被两库共同实现的 UPSERT 形式 {@code ON CONFLICT(...) DO NOTHING}
+ * —— PostgreSQL 9.5+ 与 SQLite 3.24+ 都支持，同一份 SQL 在两个 profile 下行为一致。
+ * 这条子集边界（"用标准 UPSERT + 显式冲突目标，不用方言专属的 OR IGNORE/OR REPLACE"）
+ * 就是本层刻意控制的 SQL 可移植范围，详见 docs/task-cards/P0-02-讲解.md。
  */
 @Service
 public class ApprovalService {
 
     private static final Logger log = LoggerFactory.getLogger(ApprovalService.class);
 
-    /** 主键冲突时静默忽略：0 行受影响 = 这个 request_id 之前来过。 */
-    private static final String INSERT_IGNORE_SQL =
-            "INSERT OR IGNORE INTO idempotency(request_id, response_json, trace_id, created_at) VALUES (?, ?, ?, ?)";
+    /**
+     * 冲突时静默忽略：0 行受影响 = 这个 request_id 之前来过。
+     *
+     * <p>写法刻意保持方言中立：冲突目标写成 {@code request_id} 而不是省略
+     * （省略 ON CONFLICT 目标在 PG 上仍合法，但显式写出来才对得上 SQLite 的要求，
+     * 也让"唯一键是哪一个"在 SQL 里可读）。
+     */
+    private static final String INSERT_IF_ABSENT_SQL =
+            "INSERT INTO idempotency(request_id, response_json, trace_id, created_at) VALUES (?, ?, ?, ?) "
+                    + "ON CONFLICT(request_id) DO NOTHING";
 
     private static final String SELECT_BY_REQUEST_ID_SQL =
             "SELECT response_json, trace_id FROM idempotency WHERE request_id = ?";
 
-    /** 回读重试：理论上 pool=1 时不会发生，但要挡住"未来换 PG / 放开连接池"后的竞态。 */
+    /** 回读重试：sqlite profile（pool=1，写操作串行）下用不到；
+     *  postgres profile（pool=10，真并发）下这是必要的防线，详见 selectStored 的注释。 */
     private static final int SELECT_MAX_ATTEMPTS = 20;
     private static final long SELECT_RETRY_MS = 50L;
 
@@ -70,8 +84,9 @@ public class ApprovalService {
                 false);
 
         // 插入这条审批 根据返回值inserted判断 =1 则第一次创建 =0 则重复创建
-        // INSERT OR IGNORE 代表若逐渐resquestId已存在 不插入不报错 直接返回0
-        int inserted = jdbcTemplate.update(INSERT_IGNORE_SQL, requestId, toJson(fresh), traceId, fresh.createdAt());
+        // ON CONFLICT(request_id) DO NOTHING 代表：若该 requestId 已存在，不插入、不报错，直接返回 0
+        // （原 SQLite 专有的 INSERT OR IGNORE 已换成两库通用的 UPSERT 写法，见类注释）
+        int inserted = jdbcTemplate.update(INSERT_IF_ABSENT_SQL, requestId, toJson(fresh), traceId, fresh.createdAt());
         if (inserted == 1) {
             log.info("approval created approval_id={} request_id={} flow_id={} applicant={} amount={}",
                     fresh.approvalId(), requestId, body.flowId(), body.applicant(), body.amount());
@@ -116,13 +131,13 @@ public class ApprovalService {
     }
 
     /** 这个方法sleepQuietly的意义在哪？ 答案：
-     当前环境：SQLite + 连接池大小为 1（pool=1），所有操作串行，插入和回读之间不会插进别的事务，所以理论上一次就能读到。
+     sqlite profile：连接池大小为 1（pool=1），所有操作串行，插入和回读之间不会插进别的事务，所以理论上一次就能读到。
 
-     未来环境：如果换成 PostgreSQL，或者放开连接池，就有可能出现读写并发：
+     postgres profile（P0-02 §0 之后是真实存在的一条路径，pool=10）：会出现读写并发：
 
      线程 A 的事务里 INSERT 了 request_id，但还没提交。
 
-     线程 B 的 INSERT OR IGNORE 因为 A 已占用唯一键而被忽略（返回 0）。
+     线程 B 的 INSERT ... ON CONFLICT(request_id) DO NOTHING 因为 A 已占用唯一键而被忽略（返回 0）。
 
      线程 B 立刻回读，但在“读已提交”隔离级别下，读不到 A 还没提交的那行。
 
@@ -130,7 +145,9 @@ public class ApprovalService {
 
      用“最多 20 次 × 50ms = 1 秒”的重试，给 A 的事务留出提交时间。
 
-     所以这段重试是为未来放开并发做的防御性设计，不是当前必需。
+     注意：JdbcTemplate 在没有外层事务时每条语句各自自动提交（autocommit），
+     所以正常情况下 A 的 INSERT 语句返回时就已经提交，B 的 SELECT 能立刻看到；
+     这段重试挡的是“将来把这两步放进同一个 @Transactional 里”之后的快照时序问题。
      *
      */
     private StoredRow selectStored(String requestId) {
