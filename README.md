@@ -27,3 +27,20 @@ cd python-service && uv run python -m tools.oa_client
 > 前置：先用 psql 跑 `scripts\pg-init.sql` 建角色/库，并把密码写进**本地未提交**的
 > `java-service\src\main\resources\application-postgres-local.properties`（已被 .gitignore 覆盖）。
 > 详见 `docs/architecture.md` §2.3。
+
+## 回归测试
+
+Java 侧接口改动后，对着**正在运行**的实例跑一遍端到端断言（21 项：trace 透传 / 幂等双调 / 4 类 422 / 故障开关与延迟 / 5 并发幂等）：
+
+```bat
+scripts\run-regression.cmd                                     :: 默认 sqlite 实例（:8000）
+scripts\run-regression.cmd -Label postgres                      :: 跑 PG profile 起的那份
+scripts\run-regression.cmd -BaseUrl http://127.0.0.1:8099 -Label sqlite
+```
+
+退出码 0 = 全过。PG 侧的库内校验（表结构 / append-only 权限探针 / 行数）：
+```bat
+pwsh -NoProfile -File scripts\pg-checks.ps1
+```
+> 套件里的常规 payload 是 ASCII，另用一条 **UTF-8 文件 + `curl -d @file`** 的用例验中文 payload ——
+> 避免 Windows 把命令行参数按 GBK 转换、Java 收到非法 UTF-8（历史上的 PASS=15/FAIL=6 就是这么来的）。
