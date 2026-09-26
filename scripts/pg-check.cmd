@@ -27,5 +27,5 @@ echo.
 if not "%_rc%"=="0" echo [X] psql exited with code %_rc% - see the messages above.
 
 REM Keep the window open if this script was launched by double-clicking.
-echo %cmdcmdline% | find /i "%~nx0" >nul && (echo Press any key to close... & pause >nul)
+echo %cmdcmdline% | "%SystemRoot%\System32\find.exe" /i "%~nx0" >nul && (echo Press any key to close... & pause >nul)
 exit /b %_rc%
