@@ -52,20 +52,25 @@ public class ApprovalService {
     }
 
     public ApprovalResult createApproval(String requestIdHeader, ApprovalRequest body) {
+        //检验数据
         validate(requestIdHeader, body);
 
         // 故障注入放在校验之后：参数错了就该立刻 422，别让调试者白等 5 秒
+        //422 -> 请求数据合法  但内容不对
         faultService.applyMockDelay();
 
         String requestId = body.requestId().trim();
         String traceId = TraceFilter.currentTraceId();
 
+        //创建一个审批 状态为pending 待处理  false代表第一次创建
         ApprovalResponse fresh = new ApprovalResponse(
                 "oa-" + UUID.randomUUID().toString().substring(0, 8),
                 "PENDING",
                 Instant.now().toString(),
                 false);
 
+        // 插入这条审批 根据返回值inserted判断 =1 则第一次创建 =0 则重复创建
+        // INSERT OR IGNORE 代表若逐渐resquestId已存在 不插入不报错 直接返回0
         int inserted = jdbcTemplate.update(INSERT_IGNORE_SQL, requestId, toJson(fresh), traceId, fresh.createdAt());
         if (inserted == 1) {
             log.info("approval created approval_id={} request_id={} flow_id={} applicant={} amount={}",
@@ -73,6 +78,7 @@ public class ApprovalService {
             return new ApprovalResult(fresh, false);
         }
 
+        // 根据requestId 查询对应记录
         StoredRow stored = selectStored(requestId);
         ApprovalResponse first = fromJson(stored.responseJson());
         ApprovalResponse deduped = new ApprovalResponse(first.approvalId(), first.status(), first.createdAt(), true);
@@ -109,9 +115,49 @@ public class ApprovalService {
         }
     }
 
+    /** 这个方法sleepQuietly的意义在哪？ 答案：
+     当前环境：SQLite + 连接池大小为 1（pool=1），所有操作串行，插入和回读之间不会插进别的事务，所以理论上一次就能读到。
+
+     未来环境：如果换成 PostgreSQL，或者放开连接池，就有可能出现读写并发：
+
+     线程 A 的事务里 INSERT 了 request_id，但还没提交。
+
+     线程 B 的 INSERT OR IGNORE 因为 A 已占用唯一键而被忽略（返回 0）。
+
+     线程 B 立刻回读，但在“读已提交”隔离级别下，读不到 A 还没提交的那行。
+
+     于是线程 B 查不到 → 需要等 A 提交后再读。
+
+     用“最多 20 次 × 50ms = 1 秒”的重试，给 A 的事务留出提交时间。
+
+     所以这段重试是为未来放开并发做的防御性设计，不是当前必需。
+     *
+     */
     private StoredRow selectStored(String requestId) {
         for (int attempt = 0; attempt < SELECT_MAX_ATTEMPTS; attempt++) {
+            // query方法的格式 List<T> query(String sql, RowMapper<T> rowMapper, Object... args)
             List<StoredRow> rows = jdbcTemplate.query(SELECT_BY_REQUEST_ID_SQL,
+                    /**
+                     * 第二个参数  RowMapper<T> rowMapper
+                     * lambda语法 (参数列表) -> { 方法体 }
+                     * lambda 只能用于“函数式接口”，即“只有一个抽象方法”的接口
+                     *
+                     * 下面的就是在  创建一个匿名类 这个类实现了 RowMapper<StoredRow>
+                     * 然后new出这个匿名类的对象 然后重写所实现的RowMapper<StoredRow>接口的抽象方法
+                     *
+                     * RowMapper<StoredRow> mapper = new RowMapper<StoredRow>() {
+                     *     @Override
+                     *     public StoredRow mapRow(ResultSet rs, int rowNum) throws SQLException {
+                     *         return new StoredRow(rs.getString("response_json"), rs.getString("trace_id"));
+                     *     }
+                     *     new 一个抽象不完整的类是禁止的——如果类里还有没实现的抽象方法，它就是抽象类，抽象类不能 new
+                     *
+                     * };
+                     *
+                     * RowMapper 是接口名，T 决定结果类型。
+                     * 但“实际返回的数据”是 query 返回的 List<T> 里的那些对象（由 mapRow 逐个产出），
+                     * 而不是 T 本身——T 只是类型，对象才是数据。
+                     */
                     (rs, rowNum) -> new StoredRow(rs.getString("response_json"), rs.getString("trace_id")),
                     requestId);
             if (!rows.isEmpty()) {
@@ -122,6 +168,7 @@ public class ApprovalService {
         throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, ErrorCodes.INTERNAL,
                 "idempotency record disappeared for request_id=" + requestId);
     }
+
 
     private void sleepQuietly() {
         try {

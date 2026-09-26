@@ -66,7 +66,11 @@ public class FaultService {
      */
     public void applyMockDelay() {
         int base = timeoutMs;
+
+        //if randomDelay = true 开启随机抖动 否则 不开启
         int jitter = randomDelay ? ThreadLocalRandom.current().nextInt(0, RANDOM_DELAY_MAX_MS + 1) : 0;
+
+        // 如果total <= 0 代表不睡眠 直接返回
         int total = base + jitter;
         if (total <= 0) {
             return;
@@ -75,6 +79,7 @@ public class FaultService {
         try {
             Thread.sleep(total);
         } catch (InterruptedException e) {
+            //恢复中断 因为线程睡眠了
             Thread.currentThread().interrupt();
             throw new ApiException(org.springframework.http.HttpStatus.INTERNAL_SERVER_ERROR,
                     com.p2pagent.mockoa.error.ErrorCodes.INTERNAL, "fault sleep interrupted");

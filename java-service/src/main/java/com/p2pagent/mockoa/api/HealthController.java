@@ -18,6 +18,11 @@ public class HealthController {
     @Operation(summary = "健康检查", description = "返回 {\"status\":\"ok\"}；响应头回显 X-Trace-Id")
     @GetMapping("/healthz")
     public Map<String, String> healthz() {
+        /**
+         * of()方法
+         * 生成不可变的map 不可增删改
+         * 生成的时候是什么状态  之后就固定住
+         */
         return Map.of("status", "ok");
     }
 }

@@ -50,15 +50,47 @@ public class TraceFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         String incoming = request.getHeader(TRACE_HEADER);
+
+        // UUID_SHAPE是模式对象 macher()方法是匹配池
+        //如果从请求头TRACE_HEADER拿来的字符串 如果是null 或者是空 或者不匹配^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+        //就返回true 否则false
         boolean generated = incoming == null || incoming.isBlank() || !UUID_SHAPE.matcher(incoming.trim()).matches();
+
+        // 三元表达式  if generated = true 则traceId = UUID.randomUUID().toString() 否则 = incoming.trim()
         String traceId = generated ? UUID.randomUUID().toString() : incoming.trim();
 
+        //MDC 本质是threadLocal 即每个线程都有自己专门的map 相互独立
         MDC.put(MDC_KEY, traceId);
         response.setHeader(TRACE_HEADER, traceId);
+
+        //获取时间 精确到纳秒级
         long startedAt = System.nanoTime();
+
         try {
+            //log.info(...) 被调用
+            //   │
+            //   ├─ 1. 判断日志级别是否通过（INFO 是否要输出）—— 不通过直接返回，啥也不干
+            //   │
+            //   ├─ 2. 把 {} 占位符替换成真实参数：
+            //   │      "<-- {} {} status={} cost_ms={}"
+            //   │       + method="GET", uri="/api/approval", status=200, costMs=87
+            //   │      → "<-- GET /api/approval status=200 cost_ms=87"
+            //   │
+            //   ├─ 3. 按 pattern 渲染整行：
+            //   │      %d        → "2026-09-23 10:00:00.123"
+            //   │      %thread   → "http-nio-8080-exec-1"
+            //   │      %X{traceId} → MDC.get("traceId") → "550e8400-..."   ← 关键
+            //   │      %-5level  → "INFO "
+            //   │      %logger   → "c.e.TraceFilter"
+            //   │      %msg      → 第2步的结果
+            //   │      拼成一行字符串
+            //   │
+            //   └─ 4. 把这一整行字符串写到 Console / 文件（这就是"打印"） -> 即直接打印渲染后的日志
             log.info("--> {} {} trace_source={}", request.getMethod(), request.getRequestURI(),
                     generated ? "generated" : "incoming");
+
+            //放行请求，交给下一个过滤器或最终的目标（Controller）
+            //本身是阻塞式的 指导业务执行完 返回结果后 才继续执行
             chain.doFilter(request, response);
         } finally {
             long costMs = (System.nanoTime() - startedAt) / 1_000_000L;
