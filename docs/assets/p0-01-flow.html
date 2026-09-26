@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>P0-01 一次请求的一生 — p2p-agent</title>
+<!-- 独立版：自带配色，浏览器直接打开即可（不依赖 IDE/宿主主题变量） -->
+<style>
+  :root { color-scheme: light; }
+  body { margin: 0; padding: 22px 24px; background: #ffffff; color: #1f2328;
+         font-family: "Microsoft YaHei", "Segoe UI", system-ui, sans-serif; font-size: 13px; line-height: 1.55; }
+  h1 { font-size: 16px; margin: 0 0 3px; font-weight: 600; }
+  h2 { font-size: 13px; margin: 22px 0 8px; font-weight: 600; color: #1f2328; }
+  .sub { color: #59636e; font-size: 12px; margin-bottom: 16px; }
+  .flow { display: grid; grid-template-columns: 76px 1fr; gap: 0; }
+  .side-label { color: #59636e; font-size: 11px; padding: 9px 8px 9px 0; text-align: right; }
+  .step { border-left: 2px solid #d1d9e0; padding: 7px 0 7px 13px; position: relative; margin-left: 4px; }
+  .step:before { content: ""; position: absolute; left: -5.5px; top: 13px; width: 7px; height: 7px; border-radius: 50%; background: #0969da; }
+  .step.hl:before { background: #1a7f37; }
+  .t { font-weight: 600; }
+  .code { font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; color: #0969da; }
+  .note { color: #59636e; font-size: 11.5px; display: block; margin-top: 1px; }
+  .rail { margin-top: 16px; padding: 10px 12px; border: 1px solid #d1d9e0; border-radius: 6px; background: #f6f8fa; }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+  .pill { border: 1px solid #d1d9e0; border-radius: 999px; padding: 2px 9px; font-size: 11.5px; color: #59636e; background: #fff; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+  .box { border: 1px solid #d1d9e0; border-radius: 6px; padding: 9px 11px; }
+  .box h3 { font-size: 12.5px; margin: 0 0 5px; font-weight: 600; }
+  .box ul { margin: 0; padding-left: 15px; color: #59636e; font-size: 11.5px; }
+  .box li { margin-bottom: 2px; }
+  .foot { margin-top: 18px; color: #59636e; font-size: 11.5px; border-top: 1px solid #d1d9e0; padding-top: 8px; }
+</style>
+</head>
+<body>
+  <h1>P0-01 「一次请求的一生」</h1>
+  <div class="sub">绿点 = 真实发生的步骤；<span class="code">等宽字</span> = 代码位置（本仓库真实文件）｜ 配套文字：<span class="code">docs/串讲.md</span></div>
+
+  <div class="flow">
+    <div class="side-label">Python</div>
+    <div class="step hl">
+      <div class="t">① 生成 trace_id（uuid4）</div>
+      <span class="code">python-service/tools/oa_client.py · new_trace_id()</span>
+      <span class="note">身份证由<b>调用方</b>生成，不是被调方生成后回头告诉它</span>
+    </div>
+
+    <div class="side-label">HTTP</div>
+    <div class="step">
+      <div class="t">② 两个头出发</div>
+      <span class="code">X-Trace-Id（链路身份证） + X-Request-Id（幂等键）</span>
+      <span class="note">一个管"这次调用是谁"，一个管"这次业务只许发生一次"——两件事</span>
+    </div>
+
+    <div class="side-label">Java<br>Web 层</div>
+    <div class="step hl">
+      <div class="t">③ 过滤器接住：原样透传 + 落 MDC + 先设响应头</div>
+      <span class="code">web/TraceFilter.java · @Order(HIGHEST_PRECEDENCE)</span>
+      <span class="note">合法就<b>原样</b>透传（重写则 Python 断言必挂）；非法/缺失才自己生成；先设响应头 → 异常路径也有 trace</span>
+    </div>
+
+    <div class="side-label">Java<br>业务层</div>
+    <div class="step">
+      <div class="t">④ 校验 → 故障延迟 → 幂等写入</div>
+      <span class="code">service/ApprovalService.java · createApproval()</span>
+      <span class="note">顺序刻意：参数错立刻 422（不让调试者白等 5 秒）→ 注入延迟 → 写库</span>
+    </div>
+
+    <div class="side-label">SQLite</div>
+    <div class="step hl">
+      <div class="t">⑤ 靠主键抢唯一：<span class="code">INSERT … ON CONFLICT DO NOTHING</span></div>
+      <span class="code">resources/schema.sql · idempotency(request_id PK, response_json, trace_id, created_at)</span>
+      <span class="note">影响<b>行数</b>就是答案：1 = 首次；0 = 这个 request_id 之前来过。唯一性交给数据库，不靠"先查再插"</span>
+    </div>
+
+    <div class="side-label">Java<br>业务层</div>
+    <div class="step">
+      <div class="t">⑥ 0 行 → 回读首次结果，dedup 翻成 true</div>
+      <span class="code">ApprovalService · selectStored()（20×50ms 重试兜底）</span>
+      <span class="note">返回首次那条的 approval_id / created_at = 幂等的字面含义：重复调用，世界只发生一次</span>
+    </div>
+
+    <div class="side-label">回程</div>
+    <div class="step hl">
+      <div class="t">⑦ 响应头回显 + 去重标记</div>
+      <span class="code">X-Trace-Id（= Python 发来的那串） · X-Dedup: true/false</span>
+      <span class="note">调用方当场可验证链路；不解析 body 就知道这次是不是重复</span>
+    </div>
+
+    <div class="side-label">Python</div>
+    <div class="step hl">
+      <div class="t">⑧ 断言：回显 == 自己生成的？</div>
+      <span class="code">oa_client.py · 不满足直接抛 TracePropagationError</span>
+      <span class="note">断言写在<b>发请求的函数里</b>（不是自测脚本里）→ 任何调用方都躲不过；静默通过等于没验</span>
+    </div>
+  </div>
+
+  <div class="rail">
+    <b>贯穿物：trace_id 的 5 个落点</b> —— 这就是"跨语言可观测性"
+    <div class="pills">
+      <span class="pill">① 请求头 X-Trace-Id</span>
+      <span class="pill">② Java MDC → 每行日志 [trace=…]</span>
+      <span class="pill">③ 幂等表 trace_id 列（落库可追）</span>
+      <span class="pill">④ 响应头回显（当场可验）</span>
+      <span class="pill">⑤ Python 断言（不满足就抛错）</span>
+    </div>
+  </div>
+
+  <div class="two">
+    <div class="box">
+      <h3>证据三件套（能"证明"而不是"声称"）</h3>
+      <ul>
+        <li><b>日志</b>：同一 uuid 在 Java 控制台可 grep（trace_source=incoming）</li>
+        <li><b>数据库</b>：同 request_id 只有 1 行；trace_id 列 = Python 生成的那串</li>
+        <li><b>契约文件</b>：docs/contracts/java-service-openapi.json 与运行实例 diff 一致</li>
+      </ul>
+    </div>
+    <div class="box">
+      <h3>故障开关为什么是"零件"不是玩具</h3>
+      <ul>
+        <li>制造"慢下游"（sleep 5s）→ 逼出真实超时场景</li>
+        <li>让 P0-02 的重试/退避、P1 的补偿有东西可演示</li>
+        <li>只打死写端点，不打"关开关"本身（否则调试体验灾难）</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="foot">
+    主线：<b>一个自然语言意图，要跨两个进程、穿过若干个失败点，最终"只发生一次"，而且全程可追。</b><br>
+    "只发生一次" = request_id 幂等 ｜ "全程可追" = trace_id 透传 —— P0-02 的状态机/HITL/审计都是这两个地基上的场景扩展。
+  </div>
+</body>
+</html>
