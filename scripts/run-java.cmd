@@ -1,14 +1,15 @@
 @echo off
-REM ============================================================================
-REM 启动 Java 侧 mock-oa（默认 :8000，sqlite profile）
-REM   在【任意目录】都能跑：脚本自己算项目根，不依赖你当前在哪儿
-REM   Maven 用全路径（git-bash 里的 mvn 包装器会报 classworlds 错误）
+REM ===========================================================================
+REM Start Java mock-oa on :8000 (sqlite profile by default).
+REM Works from ANY directory: the script resolves the project root itself.
+REM Maven is called by absolute path (the git-bash "mvn" wrapper fails with a
+REM classworlds ClassNotFoundException - it is a MSYS wrapper issue, not Maven).
 REM
-REM 切 PostgreSQL：
+REM PostgreSQL profile:
 REM   scripts\run-java.cmd -Dspring-boot.run.profiles=postgres
-REM   （先用 psql 跑 scripts\pg-init.sql 建角色/库，密码放本地未提交的
-REM     java-service\src\main\resources\application-postgres-local.properties）
-REM ============================================================================
+REM   (prerequisite: run scripts\pg-init.cmd once, and put the password into
+REM    local, gitignored application-postgres-local.properties)
+REM ===========================================================================
 setlocal
 set "ROOT=%~dp0.."
 "D:\software\maven-dist\apache-maven-3.9.9\bin\mvn.cmd" -f "%ROOT%\java-service\pom.xml" spring-boot:run %*
