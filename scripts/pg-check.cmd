@@ -14,7 +14,7 @@ REM   "D:\software\postgres\bin\psql.exe" -U postgres -h 127.0.0.1 -c "\password
 REM ===========================================================================
 setlocal
 set "ROOT=%~dp0.."
-set "LOG=%TEMP%\p2p-pg-check.txt"
+set "LOG=%USERPROFILE%\p2p-pg-check.txt"
 
 for /f "tokens=2 delims=:" %%c in ('chcp') do set "_prevcp=%%c"
 chcp 65001 >nul
