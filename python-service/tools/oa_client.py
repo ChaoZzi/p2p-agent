@@ -78,6 +78,7 @@ def create_approval(
 
 
 def _post_approval(
+    ## *代表后面的参数必须按关键词传 比如必须 _post_approval(request_id="x", ...)
     *,
     request_id: str,
     flow_id: str,
@@ -92,6 +93,7 @@ def _post_approval(
     if not request_id:
         raise ValueError("request_id is required")
 
+    ## trace_id 有值就用它，没值（None、空字符串等）就调 new_trace_id() 生成一个新的
     effective_trace_id = trace_id or new_trace_id()
     payload = {
         "request_id": request_id,
@@ -106,6 +108,15 @@ def _post_approval(
         "Content-Type": "application/json",
     }
 
+    # with作用：进入代码块时自动“获取/打开”资源，
+    # 离开代码块时自动“释放/关闭”资源——不管代码块里是正常结束还是抛异常
+    # 执行流程：
+    # 进入：创建 httpx.Client(...) 对象，赋给 client。
+    # 执行：跑缩进里的代码（发 POST）。
+    # 离开：无论正常还是异常，都自动调用 client.close()。
+
+    # httpx.client()作用：
+    # Client 内部维护了一个连接池。用它来发多个请求
     with httpx.Client(base_url=base_url, timeout=timeout) as client:
         response = client.post(APPROVALS_PATH, json=payload, headers=headers)
 
@@ -139,6 +150,9 @@ def check_health(base_url: str = DEFAULT_BASE_URL, trace_id: str | None = None, 
 
 def _selftest(base_url: str) -> int:
     """端到端自测：healthz → 首次创建 → 同 request_id 重复创建。"""
+    # uuid.uuid4()	生成一个随机 UUID（版本 4）
+    # .hex把 UUID 转成32 位十六进制字符串（去掉连字符）
+    # [:8]切片，取前 8 个字符
     suffix = uuid.uuid4().hex[:8]
     request_id = f"req-selftest-{suffix}"
     flow_id = f"flow-selftest-{suffix}"

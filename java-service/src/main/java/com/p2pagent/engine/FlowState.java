@@ -17,6 +17,14 @@ public enum FlowState {
     }
 
     public static FlowState of(String raw){
+        /**
+         * String.isBlank()（Java 11+）判断字符串是否为空白，包括：
+         * "".isBlank()        // true  空字符串
+         * " ".isBlank()       // true  空格
+         * "   ".isBlank()     // true  多个空格
+         * "\t\n".isBlank()    // true  制表符、换行
+         * "  a  ".isBlank()   // false 有非空白字符
+         */
         if (raw == null || raw.isBlank()){
             throw ApiException.validation("flow state is blank");
         }
