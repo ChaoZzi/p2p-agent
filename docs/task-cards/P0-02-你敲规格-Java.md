@@ -38,6 +38,46 @@ public final class FlowStateMachine {
     public static FlowState transit(FlowState from, FlowState to); // 非法 → 抛 409 FLOW_STATE_CONFLICT
 }
 ```
+
+**三个方法的分工（v1.1 补充 —— 上一版只给了签名，没说"为什么要有三个"，这是文档的缺陷）**
+
+同一张表，三种"问法"，服务三种不同场景：
+
+| 方法 | 它在回答什么 | 什么时候用 | 返回什么 |
+|---|---|---|---|
+| `canTransit(from, to)` | **"能吗？"** 是/否 | 需要**先判断再决定**的地方：给前端算"按钮该不该亮"、演示脚本打表、测试穷举 | `boolean` |
+| `nextStates(from)` | **"能去哪？"** 有哪些选择 | 展示 / 日志 / 文档；也是 `canTransit` 的实现基础 | 只读 `Set`；**没有出边 → 空集**，不是 null |
+| `transit(from, to)` | **"去做，不合法就报错"** | **业务主路径**：真的要推进状态时（`FlowService` 里每一处迁移） | 合法 → 返回 **`to`**；非法 → 抛 409 |
+
+**为什么有了 `canTransit` 还要有 `transit`**：因为"先判断、不合法就抛异常"这段代码会在**每个调用点重复出现**，而且**很容易漏** —— 有人写了 `if` 却忘了处理 else，非法状态就会被**静默推进**（这是最危险的一类 bug：世界变了，但没人知道它不该变）。`transit` 把"校验 + 失败即报错"封装成一个**绕不过去的动作**：调用方只写一行，语义就是"我要把它推进到 X"，而错误消息只有这一处维护。
+
+**`transit` 为什么有返回值（返回 `to`）**：便于链式赋值，让状态推进的代码读起来就是一句人话。
+
+```java
+// FlowService.createFlow 里（建单要连推两步）
+FlowState s = FlowState.DRAFT;
+s = FlowStateMachine.transit(s, FlowState.SUBMITTED);          // → SUBMITTED
+s = FlowStateMachine.transit(s, FlowState.PENDING_APPROVAL);   // → PENDING_APPROVAL
+
+// FlowService.approve 里
+FlowState current = FlowState.of(view.state());
+FlowState next = FlowStateMachine.transit(current, FlowState.APPROVED); // 非法 → 409（消息带 from->to）
+repository.updateStateIfCurrent(flowId, current, next, now);           // current 就是"我以为的旧状态"
+```
+
+**一句话对照**：`canTransit` 是**问句**（能吗），`nextStates` 是**清单**（有哪些），`transit` 是**命令句**（去做，做不到就报错）。
+
+**`transit` 的参考实现（4 行）**
+```java
+public static FlowState transit(FlowState from, FlowState to){
+    if (!canTransit(from, to)){
+        throw ApiException.conflict("cannot transit " + from + " -> " + to
+                + " (allowed: " + nextStates(from) + ")");
+    }
+    return to;
+}
+```
+（`ApiException.conflict` = 409 + `FLOW_STATE_CONFLICT`，见 `mockoa/error/`）
 **迁移表（照抄）**
 | from | 允许的 to |
 |---|---|
