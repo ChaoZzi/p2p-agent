@@ -153,15 +153,19 @@ FlowView reject(String flowId, String operator, String reason);
 
 **规格**
 ```java
-public record AuditEntry(String auditId, String flowId, String actor, String action,
-                        String detail, String traceId, String at) {}
 public enum AuditAction { FLOW_CREATED, SUBMITTED, APPROVAL_REQUESTED, APPROVED, REJECTED, COMPLETED, REVISE_REQUESTED }
 
 public class AuditService {
     public void append(String flowId, String actor, AuditAction action, String detail);
-    public List<AuditEntry> listByFlow(String flowId);   // 按 at 升序
+    public List<AuditView> listByFlow(String flowId);   // 按 at 升序
 }
 ```
+
+**v1.1 决策（2026-10-03，Hermes 拍板）**：审计行的载体**直接复用 dsh 已定义的 `com.p2pagent.api.dto.AuditView`**（record：`auditId, flowId, actor, action, detail, traceId, at`），**不要**再定义 `AuditEntry`。
+- 理由：字段完全相同，两个一模一样的 record 只会制造映射噪音；P0-02 的目标是最小闭环。
+- 你负责的部分是：`AuditAction` 枚举（业务语义，引擎自己的词汇表）+ 组装 `AuditView`（生成 UUID、取 traceId、填时间）+ 调 `db/AuditRepository`。
+- 留档的取舍：若将来要严格分层（内核不依赖`api.dto`），再引入 `AuditEntry` 做映射 —— 那是 P1 的事，届时**变化理由不同**（领域加字段 ≠ 契约要暴露字段）才是引入它的正当理由。
+
 **四条硬规矩**
 1. **接口上就没有 update/delete** —— append-only 的第一层保障是"代码里根本没有能改它的方法"（结构上禁止，而不是靠自觉）。
 2. 每行都带 **`traceId`**（从 P0-01 的 `TraceFilter.currentTraceId()` 取）→ 审计与日志、与 Python 侧 trace 能对上。
