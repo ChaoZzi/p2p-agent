@@ -1,0 +1,150 @@
+<!-- P0-02 主体全链路（业务视角）—— 一次采购请求走完全程，标出"你写的代码"落在哪一步
+     说明：本文件放在 docs/assets/ 便于日后复习；用 <details> 实现零依赖的展开交互。
+     配色统一用宿主提供的 CSS 变量，不自带背景/字体/外边距。 -->
+<style>
+  .wrap { display: flex; flex-direction: column; gap: 10px; max-width: 900px; }
+  .h { font-size: 20px; font-weight: 700; color: var(--foreground); margin-bottom: 2px; }
+  .sub { font-size: 13px; color: var(--muted-foreground); margin-bottom: 6px; line-height: 1.6; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted-foreground); }
+  .chip { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+          border: 1px solid var(--border); color: var(--muted-foreground); }
+  .you { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  details { border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
+  details[open] { border-color: var(--accent); }
+  summary { cursor: pointer; padding: 10px 12px; display: flex; gap: 10px; align-items: baseline; }
+  summary::marker { color: var(--muted-foreground); }
+  .n { flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border);
+       display: inline-flex; align-items: center; justify-content: center; font-size: 12px;
+       color: var(--muted-foreground); }
+  .t { font-size: 14px; font-weight: 600; color: var(--foreground); }
+  .who { font-size: 12px; color: var(--muted-foreground); margin-left: auto; white-space: nowrap; }
+  .body { padding: 0 12px 12px 44px; font-size: 13px; line-height: 1.75; color: var(--foreground); }
+  .body ul { margin: 6px 0 0; padding-left: 18px; }
+  .body li { margin: 3px 0; }
+  .k { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px;
+       padding: 1px 5px; border: 1px solid var(--border); border-radius: 5px; }
+  .why { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border);
+         font-size: 12px; color: var(--muted-foreground); }
+  .arrow { text-align: left; padding-left: 22px; color: var(--muted-foreground); font-size: 12px; }
+</style>
+
+<div class="wrap">
+  <div class="h">P0-02 主体：一次采购请求的完整链路</div>
+  <div class="sub">
+    场景：员工跟数字员工说一句「<b>帮我采购 100 个键盘，预算走 CC-1001</b>」。<br>
+    系统要把这句话变成一张<b>受控的单据</b>：建单 → 提交 → 请求审批 → 审批 → 完成，<b>每一步都留下改不掉的记录</b>。<br>
+    下面 point 开每一步，能看到「谁在做」「碰到你写的哪个文件」「没有它会怎样」。
+  </div>
+  <div class="legend">
+    <span class="chip">⚪ P0-01 已有</span>
+    <span class="chip">🔵 dsh 写的（接口层）</span>
+    <span class="chip you">🟠 你写的 [你敲]</span>
+  </div>
+
+  <details open>
+    <summary><span class="n">0</span><span class="t">员工说一句人话</span><span class="who">人 → 微信 / 演示页</span></summary>
+    <div class="body">
+      人只说业务语言，不给结构化数据：「帮我采购 100 个键盘，走 CC-1001」。
+      <div class="why">这一步决定了整个项目的卖点：<b>入口是自然语言，出口是收得住的企业流程</b>。</div>
+    </div>
+  </details>
+
+  <div class="arrow">↓ 这句话交给数字员工（Python 侧）</div>
+
+  <details>
+    <summary><span class="n">1</span><span class="t">Python 侧：把一句话变成结构化意图</span><span class="who">🔵 dsh 的 llm/deepseek.py ＋ 🟠 你以后写的 agents/intent.py</span></summary>
+    <div class="body">
+      调 DeepSeek 做意图抽取，得到 <span class="k">{"item":"键盘","qty":100,"reason":"扩编","cost_center":"CC-1001"}</span>；
+      再由 agent 决定调哪个工具（建单），并生成一次请求的身份：<span class="k">X-Request-Id</span>（幂等键）与 <span class="k">X-Trace-Id</span>（追踪号）。
+      <div class="why">这一层还没开工（P0-02 的最后一步）。<b>它不做业务判断</b> —— 规则在 Java 侧的引擎里。</div>
+    </div>
+  </details>
+
+  <div class="arrow">↓ HTTP 请求发出</div>
+
+  <details>
+    <summary><span class="n">2</span><span class="t">请求进入 Java：<span class="k">POST /api/flows</span></span><span class="who">⚪ TraceFilter ＋ 🔵 FlowController</span></summary>
+    <div class="body">
+      <ul>
+        <li><b>TraceFilter</b>（P0-01 已有）从 <span class="k">X-Trace-Id</span> 取追踪号（没有就自己生成），放进 MDC，并回显响应头 —— 之后<b>每一行日志</b>都会带 <span class="k">[trace=…]</span>。</li>
+        <li><b>FlowController</b>（dsh 写）只做三件事：取请求头（<span class="k">X-Operator</span> / <span class="k">X-Request-Id</span>）、把 body 转成 <span class="k">CreateFlowCommand</span>、调用 <span class="k">FlowService</span>。它<b>不做状态判断</b>。</li>
+      </ul>
+      <div class="why">分层：Controller 管"协议"，Service 管"业务"，状态机管"规则"。</div>
+    </div>
+  </details>
+
+  <div class="arrow">↓ 进入你写的调度员</div>
+
+  <details>
+    <summary><span class="n">3</span><span class="t">建单 + 连推两步状态 + 留痕</span><span class="who"><span class="chip you">🟠 FlowService（你写）</span></span></summary>
+    <div class="body">
+      <ul>
+        <li><b>3a 幂等</b>：<span class="k">findByRequestId</span> —— 同一个请求重复到达，直接返回原单（不重复建单）。</li>
+        <li><b>3b 建单</b>：<span class="k">insertFlow</span>(状态 = <span class="k">DRAFT</span>) → 审计 <span class="k">FLOW_CREATED</span>。</li>
+        <li><b>3c</b>：<span class="k">transit(DRAFT→SUBMITTED)</span> → 条件更新 → 审计 <span class="k">SUBMITTED</span>。</li>
+        <li><b>3d</b>：<span class="k">transit(SUBMITTED→PENDING_APPROVAL)</span> → 条件更新 → 审计 <span class="k">APPROVAL_REQUESTED</span>。</li>
+      </ul>
+      <div class="why"><b>为什么建单要连推三步</b>：让"建单"这件事在审计里也留下完整的来龙去脉，而不是凭空冒出一张"待审批"的单。
+      <br><b>没有 FlowService</b>：这些零件谁会去调？没人编排 —— 系统不转。</div>
+    </div>
+  </details>
+
+  <div class="arrow">↓ 每一步状态变更，都要问规则书 + 记账</div>
+
+  <details>
+    <summary><span class="n">4</span><span class="t">规则书：这次迁移合法吗？</span><span class="who"><span class="chip you">🟠 FlowStateMachine（你写）</span></span></summary>
+    <div class="body">
+      每次改状态前问一句 <span class="k">transit(现在, 想去的)</span>：合法就返回目标状态；不合法就抛 <span class="k">409 FLOW_STATE_CONFLICT</span>，消息里写清 <span class="k">from -&gt; to (allowed: […])</span>。
+      <div class="why"><b>没有它会发生什么（最危险的一个）</b>：一张"已完成"的单可以被重新提交、被重复审批；驳回的单可以偷偷变成已批准。业务规则不能只写在心里。</div>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="n">5</span><span class="t">黑匣子：把这一步记下来</span><span class="who"><span class="chip you">🟠 AuditService（你写的）</span> ＋ 🔵 AuditRepository</span></summary>
+    <div class="body">
+      写一行 <span class="k">audit_log</span>：<b>谁</b>(actor) <b>什么时候</b>(at) 对 <b>哪张单</b>(flow_id) 做了 <b>什么</b>(action)、<b>为什么</b>(detail)，外加这次请求的 <b>追踪号</b>(trace_id)。
+      <div class="why"><b>只增不改</b>：代码层——仓储里根本没有 update/delete 方法；数据库层——PostgreSQL 上被 REVOKE 拒绝（实测过）；业务层——和状态变更同事务。
+      <br><b>没有它</b>：单子状态变了，但没人知道是谁改的 → 不可审计、无法追责。</div>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="n">6</span><span class="t">会话结束：返回给员工一个"待审批的单"</span><span class="who">Java → Python → 人</span></summary>
+    <div class="body">
+      响应 <span class="k">FlowView</span>（状态 <span class="k">PENDING_APPROVAL</span>）→ Python 侧回一句人话：「已为你建单，等待张三审批」。
+      <div class="why">建单结束时：库里 1 行 flow + <b>审计 3 行</b>。</div>
+    </div>
+  </details>
+
+  <div class="arrow">↓ 审批人出手（人工节点 —— HITL）</div>
+
+  <details>
+    <summary><span class="n">7</span><span class="t">张三点"同意"：<span class="k">POST /api/flows/{id}/approve</span></span><span class="who"><span class="chip you">🟠 FlowService.approve</span></span></summary>
+    <div class="body">
+      <ul>
+        <li>先读出单子，用 <span class="k">FlowState.of(库里的字符串)</span> 把状态翻译成枚举 <span class="chip you">🟠 FlowState（你写的）</span></li>
+        <li><span class="k">transit(PENDING_APPROVAL→APPROVED)</span> → <b>条件更新</b>（把"我以为的旧状态"写进 WHERE）→ 审计 <span class="k">APPROVED</span>，actor = 张三</li>
+        <li><span class="k">transit(APPROVED→COMPLETED)</span> → 条件更新 → 审计 <span class="k">COMPLETED</span></li>
+      </ul>
+      <div class="why"><b>并发就发生在这里</b>：张三和李四同时点"同意"，两个请求都读到 <span class="k">PENDING_APPROVAL</span>，
+      但条件更新<b>只让一个人拿到影响行数 1</b>，另一个拿到 0 → <span class="k">409</span>。这就是"乐观锁"，也是面试必问的那道题。
+      <br>审批完：审计共 <b>5 行</b>（创建/提交/请求审批/批准/完成），5 行 trace_id 相同。</div>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="n">8</span><span class="t">回放：<span class="k">GET /api/flows/{id}/audit</span></span><span class="who">演示页 / 面试现场</span></summary>
+    <div class="body">
+      把这张单的流水按时间升序打出来 —— 谁、什么时候、做了什么、为什么，一目了然。
+      <div class="why">这是整个项目最值钱的一屏：<b>一次自然语言请求，最终变成一条可追、可解释、改不掉的证据链</b>。</div>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="n">9</span><span class="t">排障：拿一个 trace_id 串起两端</span><span class="who">⚪ TraceFilter ＋ 🔵 tracer ＋ 🟠 AuditService</span></summary>
+    <div class="body">
+      同一个 <span class="k">trace_id</span> 同时出现在：Python 侧 <span class="k">trace/&lt;id&gt;.jsonl</span>、Java 日志 <span class="k">[trace=…]</span>、以及审计表的 <span class="k">trace_id</span> 列。
+      <div class="why">跨语言排障不用靠猜时间戳：一个号，三处对账。</div>
+    </div>
+  </details>
+</div>
