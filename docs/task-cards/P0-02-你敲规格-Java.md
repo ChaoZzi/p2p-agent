@@ -144,6 +144,67 @@ FlowView approve(String flowId, String operator);
 FlowView reject(String flowId, String operator, String reason);
 ```
 
+### §3.0 动手前先做这三件事（**改造清单 —— v1.1 补充，别跳过**）
+
+你打开 `engine/FlowService.java` 会看到一个**接口**（阶段 A 的占位），`engine/FlowServiceStub.java` 是个**临时桩**（四个方法都抛 501）。你的任务是**把它们换成一个真实的实现类**。
+
+**① 把接口改成类**
+
+```java
+// 改之前（阶段 A 的占位接口：只有声明，没有方法体）
+public interface FlowService {
+    FlowView createFlow(String requestId, CreateFlowCommand cmd);
+    FlowView getFlow(String flowId);
+    FlowView approve(String flowId, String operator);
+    FlowView reject(String flowId, String operator, String reason);
+}
+
+// 改之后（你的实现类）
+@Service
+public class FlowService {
+    // ...
+}
+```
+（`@Service` 的 import：`org.springframework.stereotype.Service`）
+
+**② 注入两个依赖（构造器注入，与 dsh 的 Controller / 仓储写法一致）**
+
+```java
+private final FlowRepository flowRepository;   // 读写 flow 表（dsh 已写好）
+private final AuditService auditService;       // 写审计（你刚写的）
+
+public FlowService(FlowRepository flowRepository, AuditService auditService) {
+    this.flowRepository = flowRepository;
+    this.auditService = auditService;
+}
+```
+为什么用构造器注入：依赖能声明成 `final`（不可变）；启动期就能发现"依赖找不到/循环依赖"；单测里可以 `new FlowService(假仓储, 假审计)` 直接造。字段注入（`@Autowired` 写在字段上）只能靠反射塞值。
+（你现在的 `AuditService` 用的是字段注入 —— 可以顺手改成构造器注入保持一致，也可以先放着，我 review 时再提。）
+
+**③ 删除 `engine/FlowServiceStub.java`** —— 整个文件删掉，不是注释掉
+
+它的注释里就写着"阶段 B 请删除本文件"。不删会撞上下面两种报错之一：
+
+| 你的状态 | 看到的报错 | 含义 |
+|---|---|---|
+| stub 还在，而你的类也是 `@Service` | 启动报 `expected single matching bean but found 2` | 同一个接口有两个 Bean，Spring 不知道该注入哪个 |
+| 接口已改成 class，stub 里 `implements FlowService` 还在 | 编译报 `FlowService is not an interface` | stub 引用的东西已经不是接口了 |
+
+**⚠️ 心理预期：这三件事要一次做完**
+
+中间任何一步单独完成时，工程都是**红的**（编译不过或启动失败）—— **这是正常的，别以为自己写错了**：
+- 只删 stub、还没实现 → `FlowService` 没有实现类，Controller 注入失败
+- 只改 class、没删 stub → 报上面表格里的错
+
+**省事技巧**：stub 里那四个方法的骨架（`@Override` + 参数名）**直接复制过来当起点**，只把方法体换成 §3.1 的真逻辑 —— 签名不用重新敲。
+
+**开工检查清单**
+- [ ] `FlowService.java` 已改为 `@Service public class FlowService`
+- [ ] 构造器注入了 `FlowRepository` + `AuditService`
+- [ ] `@Service` 的 import 已加
+- [ ] `FlowServiceStub.java` 已删除
+- [ ] 四个公开方法带 `@Transactional`（`getFlow` 只读，可以不加）
+
 ### §3.1 逐步业务流程（**v1.1 —— 照这个敲，不用你猜**）
 
 **你手上的零件（真名真签名）**
