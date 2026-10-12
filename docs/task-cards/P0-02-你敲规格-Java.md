@@ -144,6 +144,118 @@ FlowView approve(String flowId, String operator);
 FlowView reject(String flowId, String operator, String reason);
 ```
 
+### §3.1 逐步业务流程（**v1.1 —— 照这个敲，不用你猜**）
+
+**你手上的零件（真名真签名）**
+
+| 零件 | 方法 | 作用 |
+|---|---|---|
+| `flowRepository`（dsh 已写） | `findByRequestId(String)` → `Optional<FlowView>` | 幂等查单 |
+| | `findById(String)` → `Optional<FlowView>` | 按 id 查单 |
+| | `insertFlow(FlowView)` | 插一行 |
+| | `updateStateIfCurrent(String id, Enum<?> expected, Enum<?> next, String updatedAt)` → `int` | **条件更新**，返回影响行数（1=我赢了 / 0=别人先改了） |
+| `auditService`（你刚写的） | `append(String flowId, String actor, AuditAction action, String detail)` | 写一条审计流水 |
+| `FlowStateMachine`（你写的） | `transit(from, to)` | 非法迁移 → 抛 409 |
+| `FlowState`（你写的） | `of(String raw)` | 库里的字符串 → 枚举 |
+
+**三个"值"的约定**
+- `now` = `Instant.now().toString()`（**每次写库前重新取一次**，用于 `updated_at`）
+- `actor`：系统自动动作一律 `"system"`；人工动作 = 方法入参 `operator`（由 Controller 从 `X-Operator` 取出后传进来）
+- `detail`：审计附注，JSON 字符串；没有内容就传 `"{}"`
+
+#### 方法 1：`createFlow(requestId, cmd)` —— 建单（幂等）
+
+```
+步骤 1  幂等查单
+        Optional<FlowView> existed = flowRepository.findByRequestId(requestId);
+        有值 → 直接 return 它（不改状态、不写审计，整个请求就是"重复了"）
+        没值 → 继续
+
+步骤 2  建单（状态 = DRAFT）
+        FlowView view = new FlowView(
+            UUID.randomUUID().toString(),   // id          ← 自己生成（不用数据库自增：两库写法不同）
+            requestId,                      // requestId   ← 方法入参
+            FlowState.DRAFT.name(),         // state       ← 枚举名（库里存字符串）
+            cmd.item(),                     // item        ← 入参命令
+            cmd.qty(),                      // qty         ← 入参命令
+            cmd.reason(),                   // reason      ← 入参命令
+            cmd.costCenter(),               // costCenter  ← 入参命令
+            now,                            // createdAt   ← 此刻
+            now);                           // updatedAt   ← 此刻（刚建出来两者相同）
+        flowRepository.insertFlow(view);
+        auditService.append(view.id(), "system", AuditAction.FLOW_CREATED,
+                            "{\"item\":\"" + cmd.item() + "\",\"qty\":" + cmd.qty() + "}");
+
+步骤 2b 并发兜底（照抄 P0-01 的套路，可后补）
+        把 insertFlow 包在 try 里，catch (DataIntegrityViolationException e) {
+            // 另一个并发请求刚用同一个 requestId 建好了 → 再查一次，返回它
+            return flowRepository.findByRequestId(requestId).orElseThrow(() -> ApiException.notFound("..."));
+        }
+        为什么：两个请求同时到达时，两边都查不到 → 都想插 → flow.request_id 的唯一键只放一个进来。
+        这个 catch 把"数据库拒绝第二个"翻译成"幂等返回原单" —— 和 P0-01 的 ON CONFLICT DO NOTHING 同一个思想。
+
+步骤 3  DRAFT → SUBMITTED
+        3a. FlowStateMachine.transit(FlowState.DRAFT, FlowState.SUBMITTED);      // 非法 → 409（新建单不可能非法，属防御性一致）
+        3b. int rows = flowRepository.updateStateIfCurrent(view.id(), FlowState.DRAFT, FlowState.SUBMITTED, now);
+            rows == 0 → throw ApiException.conflict("state changed while submitting flow " + view.id());
+        3c. auditService.append(view.id(), "system", AuditAction.SUBMITTED, "{}");
+
+步骤 4  SUBMITTED → PENDING_APPROVAL（同样三小步）
+        4a. transition(SUBMITTED, PENDING_APPROVAL)
+        4b. updateStateIfCurrent(view.id(), FlowState.SUBMITTED, FlowState.PENDING_APPROVAL, now) → 0 → 409
+        4c. auditService.append(view.id(), "system", AuditAction.APPROVAL_REQUESTED, "{}");
+
+步骤 5  重新读出并返回（返回值必须是库里的真相，不是你手里的想象）
+        return flowRepository.findById(view.id())
+                .orElseThrow(() -> ApiException.notFound("flow vanished: " + view.id()));
+```
+**跑完的结果**：状态 `PENDING_APPROVAL`，审计 **3 行**（FLOW_CREATED / SUBMITTED / APPROVAL_REQUESTED）。
+
+#### 方法 2：`getFlow(flowId)` —— 查单
+```
+步骤 1  return flowRepository.findById(flowId)
+                .orElseThrow(() -> ApiException.notFound("flow not found: " + flowId));   // 404
+```
+（只读，**不需要** `@Transactional`）
+
+#### 方法 3：`approve(flowId, operator)` —— 审批通过（连推两步）
+```
+步骤 1  读单 + 翻译状态
+        FlowView current = flowRepository.findById(flowId).orElseThrow(() -> ApiException.notFound("flow not found: " + flowId));
+        FlowState from = FlowState.of(current.state());        // 库里字符串 → 枚举
+
+步骤 2  PENDING_APPROVAL → APPROVED
+        2a. FlowStateMachine.transit(from, FlowState.APPROVED);        // from 不是 PENDING_APPROVAL → 409（消息带 from->to/allowed）
+        2b. int rows = flowRepository.updateStateIfCurrent(flowId, from, FlowState.APPROVED, now);
+            rows == 0 → throw ApiException.conflict("approve raced: flow " + flowId + " is not " + from + " anymore");
+            ★ 这一步就是并发的正面战场：两个审批人同时点"同意"，只有一个能拿到 1，另一个拿到 0 → 409
+        2c. auditService.append(flowId, operator, AuditAction.APPROVED, "{}");     // actor = 审批人
+
+步骤 3  APPROVED → COMPLETED（同理三小步）
+        3a. transit(FlowState.APPROVED, FlowState.COMPLETED)
+        3b. updateStateIfCurrent(flowId, FlowState.APPROVED, FlowState.COMPLETED, now) → 0 → 409
+        3c. auditService.append(flowId, operator, AuditAction.COMPLETED, "{}");
+
+步骤 4  return flowRepository.findById(flowId).orElseThrow(...);
+```
+**跑完的结果**：状态 `COMPLETED`；加上建单那 3 行，审计共 **5 行**。
+
+#### 方法 4：`reject(flowId, operator, reason)` —— 驳回
+```
+步骤 1  读单 → 空则 404；FlowState from = FlowState.of(current.state());
+步骤 2  PENDING_APPROVAL → REJECTED
+        2a. transit(FlowState.PENDING_APPROVAL, FlowState.REJECTED)
+        2b. updateStateIfCurrent(flowId, FlowState.PENDING_APPROVAL, FlowState.REJECTED, now) → 0 → 409
+        2c. auditService.append(flowId, operator, AuditAction.REJECTED, "{\"reason\":\"" + reason + "\"}");   // 理由进审计
+步骤 3  return 重新读出的 FlowView;
+```
+**跑完的结果**：状态 `REJECTED`；加上建单 3 行，审计共 **4 行**。
+
+**三条纪律（缺一不可）**
+1. 四个公开方法都加 `@Transactional`（状态变更与审计必须同事务）；`getFlow` 只读可不加
+2. 顺序**不许换**：先校验（transit）→ 再改状态（条件更新看行数）→ 再写审计
+3. `actor` 只从入参来，**不要在 service 里碰 `HttpServletRequest`**（分层）
+
 **每个写方法的固定骨架（顺序不许换）**
 ```
 1) 幂等/存在性检查（request_id 或 flow_id）
