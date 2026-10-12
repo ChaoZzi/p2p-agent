@@ -29,6 +29,10 @@ public class AuditRepository {
             "SELECT audit_id, flow_id, actor, action, detail, trace_id, at FROM audit_log "
                     + "WHERE flow_id = ? ORDER BY at ASC, audit_id ASC";
 
+    // jdbcTemplate 它装的是"怎么连数据库"的能力（核心是一个持有连接信息的 DataSource）。
+    // 连接信息来自配置文件：application.properties（共用项 + 默认 profile=sqlite）
+    // 加 application-sqlite.properties / application-postgres.properties（各自的数据源），
+    // 由 Spring Boot 自动装配 —— 本项目用的是 .properties 后缀的配置文件（不是 .yml）。
     private final JdbcTemplate jdbcTemplate;
 
     public AuditRepository(JdbcTemplate jdbcTemplate) {

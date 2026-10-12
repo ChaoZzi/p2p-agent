@@ -10,6 +10,15 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+// ── 学习笔记：@RestControllerAdvice 是什么 ────────────────────────
+// ① @ControllerAdvice：告诉 Spring"这个类是全局增强器"，它里面的 @ExceptionHandler
+//    方法对所有 Controller 生效，而不是只对某一个。
+// ② 本类用的是 @RestControllerAdvice = @ControllerAdvice + @ResponseBody：
+//    所以处理器返回的对象会被自动序列化成 JSON 响应体（错误体就是这么出去的）。
+// ③ 匹配规则：按异常类型匹配 —— Spring 拿抛出的异常的实际类型去找 @ExceptionHandler
+//    声明能接住它的方法；找不到精确的，就找父类的处理器
+//    （这就是为什么 Exception.class 那条能当兜底）。
+
 /**
  * 把异常统一收敛成 {"error":{"code","message","trace_id"}}。
  *
@@ -24,6 +33,8 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ApiException.class)
     public ResponseEntity<ErrorResponse> handleApiException(ApiException ex) {
         log.warn("api error code={} status={} message={}", ex.code(), ex.status().value(), ex.getMessage());
+
+        // ResponseEntity = HTTP 状态码 + 响应体：把"业务异常"翻译成给客户端的 HTTP 响应。
         return ResponseEntity.status(ex.status())
                 .body(ErrorResponse.of(ex.code(), ex.getMessage(), TraceFilter.currentTraceId()));
     }
@@ -36,6 +47,8 @@ public class GlobalExceptionHandler {
                 .body(ErrorResponse.of(ErrorCodes.VALIDATION, "malformed JSON body", TraceFilter.currentTraceId()));
     }
 
+    // 兜底分支：接"我们没预料到的"（NPE、SQL 写错……）。
+    // 关键：log.error 带完整堆栈 —— 这是发现自身 bug 的唯一信号，不要把这些异常也包装成 ApiException。
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpected(Exception ex) {
         log.error("unexpected error", ex);
