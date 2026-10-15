@@ -30,6 +30,14 @@ public class FlowRepository {
             "INSERT INTO flow(id, request_id, state, item, qty, reason, cost_center, created_at, updated_at) "
                     + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
+    /**
+     * 幂等插入用的 SQL：与 {@link #INSERT_SQL} 只差结尾的 {@code ON CONFLICT(request_id) DO NOTHING}
+     * （用途与原因见 {@link #insertFlowIfAbsent}）。
+     */
+    private static final String INSERT_IF_ABSENT_SQL =
+            "INSERT INTO flow(id, request_id, state, item, qty, reason, cost_center, created_at, updated_at) "
+                    + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(request_id) DO NOTHING";
+
     private static final String SELECT_BY_ID_SQL = "SELECT " + COLUMNS + " FROM flow WHERE id = ?";
 
     private static final String SELECT_BY_REQUEST_ID_SQL =
@@ -47,6 +55,23 @@ public class FlowRepository {
 
     public void insertFlow(FlowView flow) {
         jdbcTemplate.update(INSERT_SQL,
+                flow.id(), flow.requestId(), flow.state(), flow.item(), flow.qty(),
+                flow.reason(), flow.costCenter(), flow.createdAt(), flow.updatedAt());
+    }
+
+    /**
+     * 幂等插入：{@code request_id} 已存在时什么都不做，只返回影响行数。
+     *
+     * <p><b>为什么需要它（而不是"先查再插 + catch 唯一键冲突"）</b>：
+     * PostgreSQL 里唯一键冲突会让<b>整个事务进入 aborted 状态</b> —— catch 之后再查库会报
+     * {@code current transaction is aborted, commands ignored until end of transaction block}，
+     * 请求变成 500。SQLite 没这个问题（约束冲突只影响当条语句），所以<b>只测 SQLite 会漏掉这个坑</b>。
+     * 走 {@code ON CONFLICT ... DO NOTHING} 这条"不抛异常"的路，两个库行为一致、事务也不被污染。
+     *
+     * @return 1 = 是我插入的（调用方应继续推进状态）；0 = 已存在（并发重复请求，调用方应改为返回原单）
+     */
+    public int insertFlowIfAbsent(FlowView flow) {
+        return jdbcTemplate.update(INSERT_IF_ABSENT_SQL,
                 flow.id(), flow.requestId(), flow.state(), flow.item(), flow.qty(),
                 flow.reason(), flow.costCenter(), flow.createdAt(), flow.updatedAt());
     }

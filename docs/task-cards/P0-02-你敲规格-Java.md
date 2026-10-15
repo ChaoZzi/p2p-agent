@@ -232,7 +232,7 @@ public FlowService(FlowRepository flowRepository, AuditService auditService) {
         有值 → 直接 return 它（不改状态、不写审计，整个请求就是"重复了"）
         没值 → 继续
 
-步骤 2  建单（状态 = DRAFT）
+步骤 2  建单（状态 = DRAFT）—— 用「幂等插入」，不是普通 insert
         FlowView view = new FlowView(
             UUID.randomUUID().toString(),   // id          ← 自己生成（不用数据库自增：两库写法不同）
             requestId,                      // requestId   ← 方法入参
@@ -243,17 +243,24 @@ public FlowService(FlowRepository flowRepository, AuditService auditService) {
             cmd.costCenter(),               // costCenter  ← 入参命令
             now,                            // createdAt   ← 此刻
             now);                           // updatedAt   ← 此刻（刚建出来两者相同）
-        flowRepository.insertFlow(view);
+
+        int inserted = flowRepository.insertFlowIfAbsent(view);   // ← 幂等插入：返回影响行数
+        if (inserted == 0) {
+            // 0 = 已经有人用这个 requestId 建过了（两个并发请求都查到"不存在"）
+            //     → 返回原单，不推进状态、不写审计（整个请求到此结束）
+            return flowRepository.findByRequestId(requestId)
+                    .orElseThrow(() -> ApiException.notFound("flow not found after conflict: " + requestId));
+        }
+        // inserted == 1 → 这张单确实是我建的，继续往下
+
         auditService.append(view.id(), "system", AuditAction.FLOW_CREATED,
                             "{\"item\":\"" + cmd.item() + "\",\"qty\":" + cmd.qty() + "}");
 
-步骤 2b 并发兜底（照抄 P0-01 的套路，可后补）
-        把 insertFlow 包在 try 里，catch (DataIntegrityViolationException e) {
-            // 另一个并发请求刚用同一个 requestId 建好了 → 再查一次，返回它
-            return flowRepository.findByRequestId(requestId).orElseThrow(() -> ApiException.notFound("..."));
-        }
-        为什么：两个请求同时到达时，两边都查不到 → 都想插 → flow.request_id 的唯一键只放一个进来。
-        这个 catch 把"数据库拒绝第二个"翻译成"幂等返回原单" —— 和 P0-01 的 ON CONFLICT DO NOTHING 同一个思想。
+> **v1.2 修正（重要，别照旧版写）**：本步骤原来写的是"`insertFlow` + `catch (DataIntegrityViolationException)` 再查一次"。
+> 那个写法**在 PostgreSQL 上会直接炸**：唯一键冲突会让**整个事务进入 aborted 状态**，catch 之后的查询会报
+> `current transaction is aborted, commands ignored until end of transaction block`（SQLite 没这问题 —— 所以**只测 SQLite 会漏掉这个坑**）。
+> 现在改用 `flowRepository.insertFlowIfAbsent(view)`（内部是 `INSERT ... ON CONFLICT(request_id) DO NOTHING`），
+> 走"**不抛异常**"的路：**两个数据库行为一致，事务也不被污染** —— 与 P0-01 的幂等写法同一个思想。
 
 步骤 3  DRAFT → SUBMITTED
         3a. FlowStateMachine.transit(FlowState.DRAFT, FlowState.SUBMITTED);      // 非法 → 409（新建单不可能非法，属防御性一致）
