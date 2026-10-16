@@ -176,11 +176,53 @@ def _missing_fields(intent: PurchaseIntent) -> list[str]:
     return missing
 ```
 
+### 常见疑问：`model_validate` 这个校验方法在哪？我怎么没看到
+
+**它是 Pydantic 自动生成的，不是我们写的。** 就像 Java 的 `record` 自动得到 `equals()`/`hashCode()`/构造器、Lombok 的 `@Data` 自动生成 getter 一样 —— `class PurchaseIntent(pydantic.BaseModel)` 继承 `BaseModel` 之后，
+Pydantic 用元类在**类创建时**扫描那 4 行 `pydantic.Field(...)`，把一整套方法生成好贴在类上：
+
+| 生成的方法 | 干什么 | 我们代码里在哪用 |
+|---|---|---|
+| `model_validate(dict)` | 从字典构造 + **逐字段套约束校验**；非法 → 抛 `ValidationError` | `intent = PurchaseIntent.model_validate(raw)` |
+| `model_json_schema()` | 把字段约束导成 JSON Schema | `complete_json(..., PurchaseIntent.model_json_schema())` |
+| `model_dump()` / `model_dump_json()` | 导出字典 / JSON（落审计、返前端时用） | P0-03 用 |
+| `__init__` | 构造器，**同样会校验** | 测试里直接 `PurchaseIntent(item=..., qty=...)` |
+
+**真正的校验器是 pydantic-core（Rust 实现）**，由 Field 的约束编译出来 —— 所以"**边界写进类型，不写进 `if`**"这句话是字面意思：我们一行 `if qty > 100` 都不写，非法值在进对象的那一刻就被拦在门外。
+
+实测（`pydantic 2.14.1`）：传 `{"item":"", "qty":999, "reason":"", "cost_center":None}` →
+
+```
+3 validation errors for PurchaseIntent
+item
+  String should have at least 1 character [type=string_too_short, input_value='', input_type=str]
+qty
+  Input should be less than or equal to 100 [type=less_than_equal, input_value=999, input_type=int]
+reason
+  String should have at least 1 character [type=string_too_short, input_value='', input_type=str]
+```
+
+**这段英文文本就是代码里 `feedback` 变量回喂给模型的东西**（模型据此自己改）；程序化读数用 `exc.errors()`
+（返回 `[((字段名,), 错误类型, 说明), ...]`，将来要给前端/审计就用它，别去 parse 那段文本）。
+
+同一份约束导成的 JSON Schema 长这样（实测）：`required = ['item', 'qty', 'reason']` ——
+**`cost_center` 不在 `required` 里**，`properties.cost_center = {'anyOf':[{'type':'string'},{'type':'null'}], 'default': None}`
+→ 我们的设计意图（**允许缺失、不许编造**）被 schema 精确表达并传达给了模型。
+
+加一根钉子：`pydantic` 的 v2 API **一律是 `model_` 前缀**（v1 是 `parse_obj` / `.dict()` / `.json()`）。换版本时这些名字会变 —— 面试可讲"为什么 v2 统一加前缀"（避免与业务字段名撞车 + 一眼分辨 v1/v2 代码）。
+
 ### 自测（写完先跑，别急着提交）
 
+**PowerShell**（你在用的这个；`.venv` 里那台 python 直连，绕开 conda 的 `python` 和"uv 不在 PATH"两个坑）：
+```powershell
+cd D:\Projects\interview-project\p2p-agent\python-service
+$env:PYTHONUTF8=1
+.\.venv\Scripts\python.exe -c "import uuid; from agents.intent import extract; print(extract('买两台笔记本，给新来的同事用', str(uuid.uuid4())))"
+```
+**git-bash**（同一件事）：
 ```bash
 cd D:/Projects/interview-project/p2p-agent/python-service
-PYTHONUTF8=1 uv run python -c "import uuid; from agents.intent import extract; print(extract('买两台笔记本，给新来的同事用', str(uuid.uuid4())))"
+PYTHONUTF8=1 ./.venv/Scripts/python.exe -c "import uuid; from agents.intent import extract; print(extract('买两台笔记本，给新来的同事用', str(uuid.uuid4())))"
 ```
 **期望现象**：打印出 `(PurchaseIntent(item='笔记本', qty=2, reason=..., cost_center=None), ['cost_center'])` ——
 数量对、物品对、**cost_center 是 None 且进缺失列表**；然后 `trace/<那个uuid>.jsonl` 里多一行 `step=intent.extract`。
