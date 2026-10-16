@@ -211,6 +211,59 @@ reason
 
 加一根钉子：`pydantic` 的 v2 API **一律是 `model_` 前缀**（v1 是 `parse_obj` / `.dict()` / `.json()`）。换版本时这些名字会变 —— 面试可讲"为什么 v2 统一加前缀"（避免与业务字段名撞车 + 一眼分辨 v1/v2 代码）。
 
+### ⚠ 三个高频写错点（实测过的报错，敲之前先看）
+
+**① 缩进层级：常量和函数必须顶格（模块级），不能缩进到 `class` 里面。** 塞进类体会有两个后果：
+
+- **Pydantic 在类定义那一刻就报错**（实测 pydantic 2.14）：
+  ```
+  PydanticUserError: A non-annotated attribute was detected: `SYSTEM_PROMPT = '你是企业采购流程的意图抽取器…'`.
+  All model fields require a type annotation; if `SYSTEM_PROMPT` is not meant to be a field,
+  you may be able to resolve this error by annotating it as a `ClassVar` ...
+  ```
+  —— 它把"没有类型注解的赋值"当成"你想声明字段"，于是要求你补类型。
+- **即使绕过这一关，方法里裸写 `SYSTEM_PROMPT` 也拿不到**（实测 `NameError: name 'X' is not defined`）：
+  **Python 的类体不是方法的外层作用域** —— 方法里要读类属性只能写 `self.X` 或 `类名.X`（实测两种都行）。
+  ⚠ 这一点和 Java 相反（Java 的方法能直接看到外部类字段），所以从 Java 过来最容易踩。
+  **正确姿势不是加 `self.`，而是把常量和函数都放到类外面。**
+
+```
+# ── 模块级：顶格，不缩进 ─────────────────────────────
+STEP = "intent.extract"
+MAX_RETRY_ATTEMPTS = 1
+MAX_QTY = 100
+SYSTEM_PROMPT = (...)          # ← 常量放这里，extract() 才看得见，别的模块也能 import
+
+class PurchaseIntent(pydantic.BaseModel):   # ── 类体里只放"数据形状"
+    item: str = ...
+    qty: int = ...
+    reason: str = ...
+    cost_center: str | None = ...
+
+def extract(text: str, trace_id: str):      # ── 动作也是模块级（不塞进类）
+    ...
+
+def _missing_fields(intent):                # 私有帮手同样模块级
+    ...
+```
+
+**`extract` 为什么不该是类的方法**：① `PurchaseIntent` 是数据形状（纯声明 + 能导 schema），`extract` 是动作（调模型、写 trace），职责分开；② 它不需要实例状态，用了 `self` 反而要先造实例 —— 可它的产出**就是**那个实例；③ 规格与 `agent.py` 期望的签名是 `agents.intent.extract(text, trace_id)`；④ 模块级函数 `from agents.intent import extract` 一行就能测。**判断标准：这个函数需要实例状态吗？需要才放进类。**
+
+**② `trace_id` 是 `str` 不是 `int`**：它是 uuid 字符串（`tools/oa_client.py::new_trace_id()` 生成），下游 `record()` 拿它当**文件名**（`trace/<trace_id>.jsonl`），还要和 Java 审计列对账。
+
+**③ 重试轮数别算错**：`MAX_RETRY_ATTEMPTS = 1` 表示"额外重试 1 次"，总轮数 = **2**。
+实测：`range(1, MAX_RETRY_ATTEMPTS + 1)` → `[1]`（**只跑 1 轮，纠错重试根本没发生**）；`range(1, MAX_RETRY_ATTEMPTS + 2)` → `[1, 2]` ✅。
+
+**④ `complete_json` 是三个必填参数**（`system / user / schema`，`model` 是仅关键字且有默认值）：
+
+```python
+raw = complete_json(
+    SYSTEM_PROMPT,
+    text + feedback,                      # 第 2 轮会把校验错误原文带上
+    PurchaseIntent.model_json_schema(),   # 让模型看到同一份约束
+)
+```
+
 ### 自测（写完先跑，别急着提交）
 
 **PowerShell**（你在用的这个；`.venv` 里那台 python 直连，绕开 conda 的 `python` 和"uv 不在 PATH"两个坑）：
