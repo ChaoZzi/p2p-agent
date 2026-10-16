@@ -5,6 +5,7 @@ description = "P2P Agent Python 侧（Agent Harness + 企业系统工具客户�
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.28",
+    "pydantic>=2.14.1",
 ]
 
 [dependency-groups]
