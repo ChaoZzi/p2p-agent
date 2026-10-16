@@ -1,6 +1,6 @@
 # P0-02 §0 执行简报（给 dsh）— 存储双 profile 改造
 
-> 配套：`docs/task-cards/P0-02-min-loop.md §0`（卡）、`docs/architecture.md §2.3`（设计）、`docs/PRD.md v0.3 §7/§8`（决策）
+> 配套：`docs/archive/P0-02-min-loop.md §0`（卡）、`docs/architecture.md §2.3`（设计）、`docs/PRD.md v0.3 §7/§8`（决策）
 > 口径：**有冲突以本简报为准**（它写得更细）。设计责任：Hermes。执行：dsh。
 > 这是 P0-02 的**第一步**，独立 commit；做完**停下等 Hermes 审核**，不要连着做 P0-02 主体。
 
@@ -12,8 +12,8 @@
 
 ## 2. 硬纪律（同 P0-01 简报，重申）
 
-- 只写 §3 列出的文件；**不要动** Python 侧、`docs/`（除新增 `docs/task-cards/P0-02-讲解.md`）、`.idea/`、`.gitignore`（Hermes 已补好 `application-*-local.properties`）。
-- 交付 = 代码 + **`docs/task-cards/P0-02-讲解.md`**（逐文件"做什么/为什么/改了会怎样"）+ **真实自测证据**（命令与输出原样贴，不许改写、不许伪造）。
+- 只写 §3 列出的文件；**不要动** Python 侧、`docs/`（除新增 `docs/archive/P0-02-讲解.md`）、`.idea/`、`.gitignore`（Hermes 已补好 `application-*-local.properties`）。
+- 交付 = 代码 + **`docs/archive/P0-02-讲解.md`**（逐文件"做什么/为什么/改了会怎样"）+ **真实自测证据**（命令与输出原样贴，不许改写、不许伪造）。
 - commit 粒度：一个可演示增量一个 commit，`feat(java):` / `refactor(java):` / `docs:` 前缀；只 commit 自己负责的文件。
 - **密码卫生**：仓库里只允许出现占位符（`${PG_PASSWORD}` 等）；任何真实密码不得进文件、不得进 commit（含历史）。
 

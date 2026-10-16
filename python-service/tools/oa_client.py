@@ -1,6 +1,6 @@
 """mock-oa 的 Python 客户端（P0-01 冒烟核心）。
 
-契约来源：docs/task-cards/P0-01-dsh-brief.md §3.1 / §3.3。
+契约来源：docs/archive/P0-01-dsh-brief.md §3.1 / §3.3。
 
 本模块负责三件在 P0-01 必须被"证掉"的事：
 

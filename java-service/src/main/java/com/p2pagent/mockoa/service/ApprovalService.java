@@ -29,7 +29,7 @@ import org.springframework.stereotype.Service;
  * 换成 SQL 标准里被两库共同实现的 UPSERT 形式 {@code ON CONFLICT(...) DO NOTHING}
  * —— PostgreSQL 9.5+ 与 SQLite 3.24+ 都支持，同一份 SQL 在两个 profile 下行为一致。
  * 这条子集边界（"用标准 UPSERT + 显式冲突目标，不用方言专属的 OR IGNORE/OR REPLACE"）
- * 就是本层刻意控制的 SQL 可移植范围，详见 docs/task-cards/P0-02-讲解.md。
+ * 就是本层刻意控制的 SQL 可移植范围，详见 docs/archive/P0-02-讲解.md。
  */
 @Service
 public class ApprovalService {

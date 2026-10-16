@@ -1,8 +1,10 @@
 # P0-02 「你敲」行为规格 — Python 侧（3 个文件）
 
 > 角色：这 3 个文件是 `[你敲]` 档（agent loop 是你面试的深水区）—— **你亲手写**，Hermes 给行为规格。
-> 依据：`docs/task-cards/P0-02-min-loop.md §4`（卡）、`docs/PRD.md §7`（harness/路由）、`docs/串讲.md`（主线）。
+> 依据：`docs/archive/P0-02-min-loop.md §4`（卡）、`docs/PRD.md §7`（harness/路由）、`docs/串讲.md`（主线）。
 > 心法：**模型是"不确定的决策源"，代码是"确定的护栏"** —— 你写的每一个校验、每一次重试、每一轮上限，都是在给模型套笼子而不是替代它。
+
+> **本规格按 v1.3 交付格式**（2026-10-16）：每节 = ① 这段代码是干嘛的 → ② 处在请求哪一步 → ③ 与上下文的联系 → ④ 字段/变量逐条说明 → ⑤ 完整参考实现（照抄可跑）+ 自测。
 
 ## 0. 通用约定
 
@@ -16,32 +18,171 @@
 
 ## 1. `agents/intent.py`（先写它 —— 纯函数，最好测）
 
-**职责**：把用户一句话变成**结构化参数**，并说清"还缺什么"。它**不**做业务判断（不查预算、不建单）。
+> **本节按 v1.3 交付格式**：① 干嘛的 → ② 在请求哪一步 → ③ 与上下文的联系 → ④ 字段/变量逐条说明 → ⑤ 完整参考实现（照抄可跑）。
+>
+> **动手前 · 文件级清单（v1.2）**
+> 1. 建包目录：`python-service/agents/__init__.py`（空文件即可；没有它 → `ModuleNotFoundError: No module named 'agents'`）
+> 2. 加依赖：在 `python-service/` 下跑 **`uv add pydantic`** —— 实测当前 `pyproject.toml` **只有 httpx，没有 pydantic**，不装 → `ModuleNotFoundError: No module named 'pydantic'`
+> 3. 新建 `python-service/agents/intent.py`（第 ⑤ 段是完整代码，照着敲）
+> 4. 改完先跑一次 §5 的自测命令再提交
 
-**规格**
-```python
-class PurchaseIntent(BaseModel):
-    item: str = Field(min_length=1, max_length=100)
-    qty: int = Field(ge=1, le=100)
-    reason: str = Field(min_length=1)
-    cost_center: str | None = None          # 关键：允许缺失，不设默认值
+### ① 这段代码是干嘛的
 
-def extract(text: str, trace_id: str) -> tuple[PurchaseIntent | None, list[str]]:
-    """返回 (意图, 缺失字段名列表)。校验失败且纠错重试仍失败 → (None, []) 由上层转人工。"""
+把用户的一句人话（"我要买两台笔记本，给新来的同事用"）**翻译成字段** —— 物品 / 数量 / 事由 / 成本中心 —— 并**诚实说出"哪一项他没讲"**。它不查预算、不建单、不做任何业务判断：它只负责**听懂**，判断留给后面的人。
+
+打比方：**翻译官 + 检票员**。翻译官把中文翻成"表格"，检票员检查表格填得对不对；**表格缺项就退回去让人补，绝不代填**。
+
+### ② 它处在整个请求的哪一部分
+
+一次请求（`POST /api/chat`）的**第 1 步**，夹在"用户说话"和"建单"之间：
+
+```
+用户一句话
+ └─① agents/intent.py::extract()                    ← 你正在写的这个（本文件）
+      └─② harness/agent.py::run()                    决策循环：拿着意图+缺失项，决定"反问"还是"调工具"
+           └─③ harness/tool_registry.py::invoke("create_purchase_flow")
+                └─④ tools/flow_client.py               HTTP 调用
+                     └─⑤ Java FlowService.createFlow() 建单 + 3 条审计（你已敲完的那部分）
 ```
 
-**行为规格**
-1. 给模型一份 **JSON Schema**（由 `PurchaseIntent.model_json_schema()` 生成，别手写一份会漂的副本）→ 调 `complete_json`。
-2. 拿回 JSON 后用 **Pydantic 校验**；失败 → **把校验错误原文回喂**给模型，重试**一次**（`validate → 反馈 → 再校验`）。
-3. 缺失字段（`None`/空）→ 进"缺失列表"返回，**绝不编造默认值**：
-   - ❌ 错误做法：`cost_center` 缺就填 `"DEFAULT"`
-   - ✅ 正确做法：报缺失，由 agent 生成反问（这叫 HITL 的雏形 —— 拿不准就问人）
-4. 数量/金额边界：`qty>=1`、`qty<=100`（超出 → 校验失败 → 走纠错重试 → 仍失败则转人工）。**边界写进类型，不写进 if**。
-5. 全过程落 trace（原始话、模型输出、校验结果、重试次数）。
+- **上游**：`harness/agent.py`（第 2 步）调它；再上游是 `web/chat_api.py`（dsh 写，收 HTTP 请求）。
+- **下游**：它**不直接调任何工具**，只把结果**返回**给 `agent.py`；真正的建单发生在第 3 步。
+- **没有它会怎样**：模型说什么就照做什么。用户只说"买笔记本"（没说数量和成本中心），系统会自己编一个数字去建单 —— **这是最危险的失败模式：数据凭空产生，而且看起来完全正常。**
 
-**面试追问预演**
-- "为什么不让模型直接输出最终 JSON 就信它？" → 三层护栏：**schema 约束 + 校验 + 纠错重试**；再叠加"缺失就问人"。模型的错误是概率性的，护栏必须是确定性的。
-- "为什么要重试一次而不是三次？" → 一次纠错的成本收益最高（多数失败是格式问题）；再多说明**任务本身超出模型能力**，继续重试只是烧钱 —— 该转人工/换 pro 模型（这是路由策略的入口）。
+### ③ 它与上下文的联系
+
+| 关系 | 说明 |
+|---|---|
+| 入参 `text` | 用户原话；由 `agent.py` 从会话 `state` 里取出后传进来 |
+| 入参 `trace_id` | 与 Java 侧审计、`trace/*.jsonl` 共用**同一个 uuid**（`tools/oa_client.py::new_trace_id()` 生成）→ 两端靠它对账 |
+| 调 `llm/deepseek.py::complete_json(...)` | 它**唯一**允许碰"模型"的地方（**钉子接口**，别自己写 HTTP） |
+| 调 `trace/tracer.py::record(...)` | 落 JSONL（**钉子接口**），一行一个步骤；实测 `from trace.tracer import record` 在 `python-service/` 下可正常导入 |
+| 返回值 | 交给 `agent.py`：有缺失 → 生成反问（HITL 雏形）；`(None, [])` → 转人工 |
+| 共享状态 | **无** —— 它是纯函数：只读入参、只写 trace，不碰会话 `state`、不碰数据库（所以它最好测；也是这三个文件里唯一能单独测的） |
+
+### ④ 字段 / 变量逐条说明
+
+**`PurchaseIntent`（模型必须产出的形状；也是喂给模型的 JSON Schema 的来源）**
+
+| 字段 | 是什么 | 值从哪来 | 为什么需要 | 不填 / 填错会怎样 |
+|---|---|---|---|---|
+| `item` | 采购物品名 | 模型从用户话里抽 | 建单必填项 | 空串被 `min_length=1` 拦下 → 校验失败；只有空格时进"缺失"列表 |
+| `qty` | 数量（整数） | 模型抽取 | 建单必填；P0-03 里是金额与审批链的依据 | 越界（`0` 或 `>100`）→ 校验失败 → 纠错重试 → 仍失败转人工；**不四舍五入、不截断** |
+| `reason` | 采购事由 | 模型抽取 | 审计 detail 要写清"为什么买" | 空 → 校验失败或进缺失列表 |
+| `cost_center` | 成本中心编码 | **用户话里有才有**，没有就是 `None` | 审计与预算归属 | **宁可为 `None` 也绝不许编**：编一个 `"DEFAULT"` 会让单据落到错误的成本中心，而且看起来完全正常 |
+
+**`extract(text, trace_id)` 的入参与返回值**
+
+| 名字 | 是什么 | 值从哪来 | 怎么被用 |
+|---|---|---|---|
+| `text` | 用户这一轮的原话 | `agent.py` 从会话 state 取 | 作为 `complete_json` 的 `user` 内容 |
+| `trace_id` | 一次请求的 uuid | 上游生成（`new_trace_id()`） | 传给 `record()`；**不生成、不改写** |
+| 返回 `PurchaseIntent` | 校验通过的意图 | 本函数产出 | `agent.py` 据此决定"反问"还是"建单" |
+| 返回 `list[str]` | 缺失字段名（如 `["cost_center"]`） | `_missing_fields()` 算出 | `agent.py` 用它生成"请问成本中心是？" |
+| 返回 `(None, [])` | **放弃**（两次产出都不合法） | 纠错重试仍失败 | 转人工（P0-03 接 HITL） |
+
+**模块常量 / 局部变量**
+
+| 名字 | 是什么 | 值 | 为什么 |
+|---|---|---|---|
+| `MAX_RETRY_ATTEMPTS` | 校验失败后**额外**重试次数 | `1` | 一次纠错的成本收益最高；再多说明**任务本身超出模型能力**（该换 pro 模型或转人工）= 路由策略的入口 |
+| `MAX_QTY` | 数量上限 | `100` | 与 Java 侧 `qty` 校验边界保持同一份约定；**边界写进类型，不写进 `if`** |
+| `STEP` | trace 的步骤名 | `"intent.extract"` | JSONL 能按步骤 grep；全项目步骤名不重复 |
+| `SYSTEM_PROMPT` | 给模型的角色与规则 | 常量 | 稳定前缀利于服务端 prompt 缓存；**明确写"没说就返回 null，不许猜"** —— 防编造的第一道护栏 |
+| `feedback` | 回喂给模型的校验错误原文 | Pydantic `ValidationError` 的文本 | 让**模型自己改**，而不是我们在代码里猜它的意图 |
+
+### ⑤ 完整参考实现（照抄）
+
+```python
+"""意图抽取（P0-02 主体 §1）。
+
+职责：用户一句话 → 结构化参数（PurchaseIntent）+ 缺失字段清单。
+不做业务判断：不查预算、不建单、不碰会话 state。
+三层护栏：JSON Schema 约束（给模型看）→ Pydantic 校验（我们说了算）→ 纠错重试一次（把错误原文回喂）。
+"""
+
+from __future__ import annotations
+
+import pydantic
+
+from llm.deepseek import complete_json            # 钉子接口：模型调用只走它
+from trace.tracer import record                   # 钉子接口：trace 只走它
+
+STEP = "intent.extract"          # trace 步骤名（全项目不重复，便于 grep 与回放）
+MAX_RETRY_ATTEMPTS = 1           # 校验失败后"额外"重试几次：1 次（再多说明任务超出模型能力）
+MAX_QTY = 100                    # 与 Java 侧 qty 边界同一份约定；写进类型，不写进 if
+
+
+class PurchaseIntent(pydantic.BaseModel):
+    """采购意图：模型必须产出的形状（它的 model_json_schema() 就是喂给模型的 schema）。"""
+
+    item: str = pydantic.Field(min_length=1, max_length=100)   # 物品；空串直接被拦
+    qty: int = pydantic.Field(ge=1, le=MAX_QTY)                # 数量；越界即校验失败
+    reason: str = pydantic.Field(min_length=1)                 # 事由；审计要写
+    cost_center: str | None = pydantic.Field(default=None)      # 关键：允许缺失，**不给默认值**
+
+
+SYSTEM_PROMPT = (
+    "你是企业采购流程的意图抽取器。从用户的中文描述里抽取采购申请的结构化字段。"
+    "只抽用户明确说出的信息：用户没提成本中心，cost_center 就返回 null，绝对不要猜测或编造。"
+    f"qty 必须是 1 到 {MAX_QTY} 之间的整数。"
+)
+
+
+def extract(text: str, trace_id: str) -> tuple[PurchaseIntent | None, list[str]]:
+    """把一句话抽成 (意图, 缺失字段名列表)。
+
+    校验失败 → 把错误原文回喂模型重试一次；再失败 → 返回 (None, []), 由上层转人工。
+    """
+    feedback = ""
+    for attempt in range(1, MAX_RETRY_ATTEMPTS + 2):          # 1 次原始 + 1 次纠错 = 2 轮
+        raw = complete_json(
+            SYSTEM_PROMPT,
+            text + feedback,                                   # 第 2 轮带着错误原文
+            PurchaseIntent.model_json_schema(),                # 由模型生成，不手写副本
+        )
+        try:
+            intent = PurchaseIntent.model_validate(raw)         # 校验：我们说了算的那一层
+        except pydantic.ValidationError as exc:
+            feedback = f"\n\n上次输出未通过校验，错误如下：\n{exc}\n请修正后重新输出 JSON。"
+            record(trace_id, STEP, {
+                "attempt": attempt, "text": text, "raw": raw,
+                "ok": False, "validation_error": str(exc),
+            })
+            continue                                           # 带着错误再问一次
+
+        missing = _missing_fields(intent)                      # 校验过了，再看"缺什么"
+        record(trace_id, STEP, {
+            "attempt": attempt, "text": text, "raw": raw,
+            "ok": True, "missing": missing,
+        })
+        return intent, missing
+
+    record(trace_id, STEP, {"attempt": MAX_RETRY_ATTEMPTS + 1, "text": text, "gave_up": True})
+    return None, []                                            # 交给上层转人工，绝不猜
+
+
+def _missing_fields(intent: PurchaseIntent) -> list[str]:
+    """哪些字段用户没讲清楚（业务上必须有）—— 只报缺失，**绝不代填默认值**。"""
+    missing: list[str] = []
+    if not intent.item.strip():
+        missing.append("item")
+    if not intent.reason.strip():
+        missing.append("reason")
+    if intent.cost_center is None or not intent.cost_center.strip():
+        missing.append("cost_center")
+    return missing
+```
+
+### 自测（写完先跑，别急着提交）
+
+```bash
+cd D:/Projects/interview-project/p2p-agent/python-service
+PYTHONUTF8=1 uv run python -c "import uuid; from agents.intent import extract; print(extract('买两台笔记本，给新来的同事用', str(uuid.uuid4())))"
+```
+**期望现象**：打印出 `(PurchaseIntent(item='笔记本', qty=2, reason=..., cost_center=None), ['cost_center'])` ——
+数量对、物品对、**cost_center 是 None 且进缺失列表**；然后 `trace/<那个uuid>.jsonl` 里多一行 `step=intent.extract`。
+**如果它自己编了一个 cost_center（比如 "DEFAULT"）→ 护栏没生效，停下来找我。**
 
 ## 2. `harness/tool_registry.py`（工具的"身份证 + 检查站"）
 

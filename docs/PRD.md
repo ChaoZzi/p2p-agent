@@ -4,7 +4,7 @@
 |---|---|
 | 版本 | **v0.3**（2026-09-22，存储决策定案） |
 | 变更 | v0.1 纯 Python → v0.2 方案 C 双语言、里程碑重排 → **v0.3 存储从"仅 SQLite"改为双 profile（SQLite 默认 / PostgreSQL 16 可选），SQL 只写两边通用子集** |
-| 评审依据 | `docs/评审报告-面试项目评估.md`（dsh 产出，含 8+ 真实 JD 证据链接） |
+| 评审依据 | `docs/archive/评审报告-面试项目评估.md`（dsh 产出，含 8+ 真实 JD 证据链接） |
 | 目录 | `D:\Projects\interview-project\p2p-agent` |
 
 ---

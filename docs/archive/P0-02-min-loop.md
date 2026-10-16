@@ -16,7 +16,7 @@
 | `src/main/resources/application-sqlite.properties` / `application-postgres.properties` | 分开：URL/驱动/连接池（sqlite=1，pg=10）；PG 用 `${PG_USER}` `${PG_PASSWORD}` `${PG_URL:jdbc:postgresql://127.0.0.1:5432/p2p_agent}` 占位 |
 | `src/main/resources/schema.sql` → 拆成 `schema-sqlite.sql` + `schema-postgres.sql` | 用 `spring.sql.init.platform` 选择；两版 DDL 都要**幂等**（`IF NOT EXISTS`） |
 | `service/ApprovalService.java` | 两条 SQL 改为两边通用写法（`ON CONFLICT(request_id) DO NOTHING`），去掉 SQLite 专有的 `INSERT OR IGNORE` |
-| `docs/task-cards/P0-02-讲解.md` | 记录 profile 机制、SQL 可移植子集的边界、PG 侧 append-only 的做法 |
+| `docs/archive/P0-02-讲解.md` | 记录 profile 机制、SQL 可移植子集的边界、PG 侧 append-only 的做法 |
 
 **验收（全部要实测证据）**
 - [ ] **默认（sqlite）行为与 P0-01 完全一致**：P0-01 的 7 条验收 + 21 项断言原样全过（回归）

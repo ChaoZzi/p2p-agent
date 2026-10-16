@@ -1,7 +1,7 @@
 # P0-02 「你敲」行为规格 — Java 侧（4 个文件）
 
 > 角色：这 4 个文件是 `[你敲]` 档 —— **你亲手写**，Hermes 只给行为规格（细到能照着敲），写完由你 commit。
-> 依据：`docs/task-cards/P0-02-min-loop.md §2/§4`（卡）、`docs/architecture.md §3`（状态机）、`docs/串讲.md`（主线）。
+> 依据：`docs/archive/P0-02-min-loop.md §2/§4`（卡）、`docs/architecture.md §3`（状态机）、`docs/串讲.md`（主线）。
 > 心法：**每个方法都问自己三句** —— 前置条件是什么？成功后世界变成什么样？失败时调用方拿到什么？
 
 ## 0. 通用约定（先读，三件都会影响你后面每一行）

@@ -1,6 +1,6 @@
 # P0-02 主体 执行简报（给 dsh）— 最小闭环：建单 → 审批 → 完成 → 审计
 
-> 配套：`docs/task-cards/P0-02-min-loop.md`（卡，验收标准）、`docs/task-cards/P0-02-你敲规格-Java.md §0`（包结构与分档边界）、`docs/architecture.md §2.2/§3`（契约与状态机）
+> 配套：`docs/archive/P0-02-min-loop.md`（卡，验收标准）、`docs/task-cards/P0-02-你敲规格-Java.md §0`（包结构与分档边界）、`docs/architecture.md §2.2/§3`（契约与状态机）
 > 冲突时以**本简报**为准。设计责任：Hermes。执行：dsh。**做完每一阶段停下等 Hermes 审核。**
 
 ## 1. 为什么要分阶段（接口先行）
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 - [ ] A2：4 个端点全部可用（`POST/GET/approve/reject/audit`），非法迁移返回 409（贴 curl 输出）
 - [ ] A3：`llm/deepseek.py` 被真调一次（`DEEPSEEK_API_KEY` 从 `.env` 读取，**key 不入库**）；`tracer.record` 落出 JSONL 样例行
 - [ ] A4：PG profile 启动后 `java-service/data/` 不再被创建
-- [ ] 讲解：`docs/task-cards/P0-02-主体-讲解.md` 覆盖"为什么先交接口层""条件更新与幂等的关系""审计 append-only 的三层保障（代码/数据库权限/同事务）"
+- [ ] 讲解：`docs/archive/P0-02-主体-讲解.md` 覆盖"为什么先交接口层""条件更新与幂等的关系""审计 append-only 的三层保障（代码/数据库权限/同事务）"
 
 ## 5. 硬纪律（同前）
 

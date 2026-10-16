@@ -14,7 +14,7 @@ import org.springframework.stereotype.Repository;
  * 没有任何"改一行"的入口 —— 这不是靠自觉，而是<b>结构上不存在这个能力</b>：
  * 想改一条审计，必须先在这个类里新加一个方法，那是一次会被 review 看见的改动。
  *
- * <p>另外两层保障（见 docs/task-cards/P0-02-主体-讲解.md）：
+ * <p>另外两层保障（见 docs/archive/P0-02-主体-讲解.md）：
  * 数据库层（PG {@code REVOKE UPDATE, DELETE}）、业务层（状态变更与审计写入在同一事务；每次迁移必写一条）。
  */
 @Repository

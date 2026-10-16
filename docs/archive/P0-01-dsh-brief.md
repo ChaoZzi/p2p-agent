@@ -1,6 +1,6 @@
 # P0-01 施工说明（给 dsh 的执行简报）
 
-> 本文件 = `docs/task-cards/P0-01-smoke.md` 的**字段级补充**，由 Hermes 确认契约后产出。
+> 本文件 = `docs/archive/P0-01-smoke.md` 的**字段级补充**，由 Hermes 确认契约后产出。
 > 给 dsh 用：把本文件整篇作为会话开场指令。卡以 `P0-01-smoke.md` 为准，**字段、版本、路径以本文件为准**（有冲突时本文件优先，因为它写得更细）。
 > 产出日期：2026-09-19　设计责任：Hermes
 
@@ -10,7 +10,7 @@
 
 - 你是 **dsh**：只负责**编码执行**。需求/架构/审核由 Hermes 做，用户负责验收与 commit 把关。
 - **只写 P0-01 范围内的文件**。不要动 `docs/`（除新增 `docs/contracts/java-service-openapi.json` 与你的《讲解.md`）、不要动 `.idea/`、不要动 `.gitignore`、不要写 README 之外的东西。
-- 交付物 = 代码 + **`docs/task-cards/P0-01-讲解.md`**（逐文件讲清"这段代码做什么、为什么这么写、改了会怎样"）+ **自测证据**（真实命令输出，贴进讲解.md）。
+- 交付物 = 代码 + **`docs/archive/P0-01-讲解.md`**（逐文件讲清"这段代码做什么、为什么这么写、改了会怎样"）+ **自测证据**（真实命令输出，贴进讲解.md）。
 - **commit 纪律**：一个可演示增量 = 一个 commit，message 用 `feat:` / `fix:` / `docs:` 前缀。只 commit 你负责的文件。（P0-01 全部是 dsh 档，没有 `[你敲]` 文件，用户只做 review + 合入。）
 - 交付后**停下来等 Hermes 审核**，不要自己接着做 P0-02。
 
@@ -97,7 +97,7 @@ feat(python): oa_client 与 trace 透传断言                ← commit
 docs: P0-01 讲解.md（逐文件 + 自测证据）                  ← commit
 ```
 
-`docs/task-cards/P0-01-讲解.md` 必须覆盖：
+`docs/archive/P0-01-讲解.md` 必须覆盖：
 - 每个文件 1–3 句：作用、关键设计决策、改了会怎样
 - trace_id 从 Python 到 Java 的完整链路（贴两端原始输出）
 - 幂等表为什么用 `INSERT OR IGNORE` + `SELECT`（并发下会发生什么）

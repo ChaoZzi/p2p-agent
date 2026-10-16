@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <!-- mock-oa 冒烟服务。手写 pom（start.spring.io 本机不可达）。
-         版本基线来自 docs/task-cards/P0-01-dsh-brief.md §2，不要自创版本。
+         版本基线来自 docs/archive/P0-01-dsh-brief.md §2，不要自创版本。
          P0-02 §0 起支持双存储 profile：sqlite（默认）/ postgres。 -->
     <parent>
         <groupId>org.springframework.boot</groupId>
