@@ -1,6 +1,8 @@
 package com.p2pagent.engine;
 
 import com.p2pagent.mockoa.error.ApiException;
+import org.springframework.stereotype.Component;
+
 import java.util.Map;
 import java.util.Set;
 

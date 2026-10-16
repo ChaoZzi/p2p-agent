@@ -4,12 +4,12 @@ import com.p2pagent.mockoa.error.ApiException;
 
 public enum FlowState {
     // 每个枚举值在内存里只有一个实例（单例）。
-    DRAFT,
-    SUBMITTED,
-    PENDING_APPROVAL,
-    APPROVED,
-    REJECTED,
-    COMPLETED;
+    DRAFT,  //草稿
+    SUBMITTED, //已提交
+    PENDING_APPROVAL, //待审批
+    APPROVED, //已通过/已批准
+    REJECTED, //已拒绝/已驳回
+    COMPLETED; //已完成
 
     // 是否是终点
     public boolean isTerminal(){
