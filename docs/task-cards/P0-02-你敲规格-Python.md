@@ -22,7 +22,9 @@
 >
 > **动手前 · 文件级清单（v1.2）**
 > 1. 建包目录：`python-service/agents/__init__.py`（空文件即可；没有它 → `ModuleNotFoundError: No module named 'agents'`）
-> 2. 加依赖：在 `python-service/` 下跑 **`uv add pydantic`** —— 实测当前 `pyproject.toml` **只有 httpx，没有 pydantic**，不装 → `ModuleNotFoundError: No module named 'pydantic'`
+> 2. 依赖 **已装好**（Hermes 代装，依赖属 `[dsh写]` 档）：`pydantic 2.14.1`。**本机 uv 不在系统 PATH**（它是 Hermes 自带那份），以后自己加依赖用：
+>    `cd D:\Projects\interview-project\p2p-agent\python-service` → `& "C:\Users\姜盛超\AppData\Local\hermes\bin\uv.exe" add <包名>`
+>    ⚠ 这个 `.venv` **没有 pip**（uv 建的默认不装）→ 不要用 `pip install` 兜底；PowerShell 里也不要写 `.\uv`（当前目录没有 uv.exe，会报"无法识别"）。
 > 3. 新建 `python-service/agents/intent.py`（第 ⑤ 段是完整代码，照着敲）
 > 4. 改完先跑一次 §5 的自测命令再提交
 
