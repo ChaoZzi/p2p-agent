@@ -283,37 +283,263 @@ PYTHONUTF8=1 ./.venv/Scripts/python.exe -c "import uuid; from agents.intent impo
 
 ## 2. `harness/tool_registry.py`（工具的"身份证 + 检查站"）
 
-**职责**：注册工具、把工具描述喂给模型、并在**执行前**做参数校验。它不关心工具内部怎么实现。
+> **本节按 v1.3 交付格式**：① 干嘛的 → ② 在请求哪一步 → ③ 与上下文的联系 → ④ 字段/变量逐条说明 → ⑤ 完整参考实现。
+>
+> **动手前 · 文件级清单**
+> 1. 建包目录：`python-service/harness/__init__.py`（空文件）
+> 2. 新建 `python-service/harness/tool_registry.py`（第 ⑤ 段是完整代码）
+> 3. 不需要新依赖（只用标准库 `dataclasses` / `time` / `typing` + 已有的 `trace.tracer`）
+> 4. ⚠ **命名坑（实测）**：项目里有 `python-service/trace/` 包，它和 **Python 标准库的 `trace` 同名**。
+>    用 `python <别的目录的脚本>` 跑时，脚本所在目录会被插到 `sys.path[0]`（优先级高于 cwd）→
+>    `from trace.tracer import record` 报 `ModuleNotFoundError: No module named 'trace.tracer'; 'trace' is not a package`。
+>    **规避**：在 `python-service/` 目录下用 `python -c` / `python -m`（cwd 优先），或 `pytest`（`pyproject.toml` 已配 `pythonpath=["."]`）。
 
-**规格**
+### ① 这段代码是干嘛的
+
+工具的 **"身份证 + 检查站"**。它回答三个问题：**有哪些工具**（整理成给模型看的清单）、**这个工具收什么参数**（JSON Schema）、**这次调用该不该放行**（执行前校验）。
+
+它**不实现任何业务** —— 不知道什么是采购单、不碰 HTTP、不碰数据库。它的 executor 是别人写的函数，它只负责决定"让不让它跑、按什么参数跑"。
+
+打比方：**机场安检 + 登机口**。工具是旅客（有护照 = 参数 schema），registry 是安检口：护照不对（缺必填/类型错）当场拦下并说明原因；工具在里面自己摔了（抛异常），也由它记一笔、不让整个航班停飞。
+
+### ② 它处在整个请求的哪一部分
+
+```
+用户一句话
+ └─① agents/intent.py::extract()              ← 已完成 ✅
+      └─② harness/agent.py::run()              决策循环（下一段）
+           ├─ 模型说 {"action": "tool:create_purchase_flow", "args": {...}}
+           └─③ harness/tool_registry.py::invoke()   ← 你正在写的这个
+                ├─ 查表 → 校验参数 → 执行 executor
+                └─④ tools/flow_client.py → HTTP → Java FlowService（已完成的 Java 侧）
+                     └─ 结果作为"观察"回到 ②，模型再决策
+```
+
+- **上游**：`harness/agent.py`（第 2 步）在模型要求调用工具时调它。
+- **下游**：它调 `Tool.executor`（实际是 `tools/flow_client.py` 里的函数），**不直接碰 HTTP**。
+- **没有它会怎样**：模型给的参数会**原样**打到后端 —— 模型少传 `qty`、传个字符串 `"两台"`、甚至编一个不存在的工具名，全都变成 500/脏数据。更糟的是：工具一旦抛异常，整个 agent 循环直接崩，用户看到 500 而不是"我能自己修正"。
+
+### ③ 它与上下文的联系
+
+| 关系 | 说明 |
+|---|---|
+| 入参 `state` | 会话状态（`agent.py` 维护的 dict）。**必须含 `state["trace_id"]`** —— 本模块靠它写 trace，不额外加参数 |
+| 入参 `args` | **模型产出的、完全不可信**的字典 → 所以必须先校验再执行 |
+| 入参 `name` | 模型给的字符串（`"tool:create_purchase_flow"` 去掉前缀后传进来） |
+| `Tool.parameters` | 来自工具自己的 JSON Schema，`schemas()` 把它交给模型 → **模型看到的边界 == 我们校验用的边界**（同一份，不手抄副本） |
+| `Tool.executor` | `tools/flow_client.py` 里的函数，签名统一 `executor(state: dict, **args) -> dict` |
+| 返回值 | **直接进"观察"上下文喂回模型** → 必须是结构化、能读懂的东西（这也是"错误也是观察"的前提） |
+| 共享事务/数据库 | **无**。纯内存表 + 一次 trace 落盘 |
+
+### ④ 字段 / 变量逐条说明
+
+**`Tool`（一个工具的"身份证"）**
+
+| 字段 | 是什么 | 值从哪来 | 为什么需要 | 不填 / 填错会怎样 |
+|---|---|---|---|---|
+| `name` | 工具唯一名，如 `create_purchase_flow` | 注册时手写 | 模型用它在 `action` 里点名；也是 trace 里的标识 | 空/重复 → `register()` 直接 `ValueError`（静默覆盖是事故源） |
+| `description` | 给模型看的**"何时用"**（不是"是什么"） | 写工具的人 | 模型靠它决定"这轮该不该调它" | 写成"创建采购流程"（是什么）→ 模型不知道什么时候该用；要写"用户信息齐全、要真正建单时用" |
+| `parameters` | 参数的 JSON Schema（`type: object`） | 工具自己声明 | ① 交给模型看 ② 用作校验依据（**同一份**） | 不是 object 类型 → `register()` 拒绝；缺 `required` → 缺参数也能过（脏数据进后端） |
+| `executor` | 真正干活的函数 | `tools/flow_client.py` | 把"检查"和"执行"分开（registry 不认识实现） | 签名不是 `(state, **args)` → 调用时 `TypeError`；它抛异常会被 registry 接住变成 `EXECUTOR_FAILED` |
+| `side_effect` | 是否有副作用（建单/审批 = True） | 写工具的人 | **本卡不参与逻辑**，P0-03 的权限分级（要先 HITL 确认）要用 | 标错 → P0-03 会把"只读查询"也拦下来要人工确认（体验崩），或把"建单"放过（危险） |
+
+**`ToolRegistry` 的四个方法**
+
+| 方法 | 干什么 | 失败时 |
+|---|---|---|
+| `register(tool)` | 注册；重名/空名/参数不是 object schema → **抛 `ValueError`** | 配置错误，启动期就该炸（不返回结构化错误） |
+| `get(name)` | 取工具 | 没有 → 抛 `ToolNotFound`（同样属于"配置错误"） |
+| `schemas()` | 给模型的工具清单 `[{"name","description","parameters"}]` | — |
+| `invoke(name, args, state)` | **固定四步**：查表 → 校验 → 执行 → 记录；**永远返回 dict，不抛异常** | 全部转成结构化错误（见下表） |
+
+**`invoke` 的入参 / 返回值**
+
+| 名字 | 是什么 | 值从哪来 | 怎么被用 |
+|---|---|---|---|
+| `name` | 工具名 | `agent.py` 从模型的 `action` 里解析出来 | 查 `self._tools` |
+| `args` | 参数字典 | **模型**（不可信） | 先 `_validate_args`，再 `executor(state=state, **args)` |
+| `state` | 会话状态 | `agent.py` 维护 | 传给 executor；同时 `state["trace_id"]` 用于 trace（缺失时兜底 `"unknown"`，绝不因为 trace 崩业务） |
+| 返回 `{"ok": True, "data": ...}` | 成功 | executor 的返回值 | 作为 observation 喂回模型 |
+| 返回 `{"ok": False, "error": {"code","detail","tool"}}` | 失败 | 四步里任一失败 | **同样喂回模型** —— 模型能据此改参数重试 |
+
+**四个错误码（跨语言契约，大写+下划线）**
+
+| code | 什么时候 | detail 里写什么 |
+|---|---|---|
+| `TOOL_NOT_FOUND` | `name` 不在表里 | `unknown tool: xxx` + 可用工具列表（可选） |
+| `INVALID_ARGS` | 缺必填 / 类型错 / enum 不符 / 多了不认识的键 | **列出缺哪些、允许哪些**（模型据此改） |
+| `EXECUTOR_FAILED` | executor 抛了异常 | `异常类名: 消息`（绝不把堆栈塞给模型） |
+| （成功） | — | `ok: True` + `data` |
+
+**模块常量 / 私有类**
+
+| 名字 | 值 | 为什么 |
+|---|---|---|
+| `STEP` | `"tool.invoke"` | trace 步骤名；与 `intent.extract` 同一套命名 |
+| `_TYPE_CHECKS` | `{"string":..., "integer":..., ...}` | 最小可用类型校验表（**不引 jsonschema 依赖**，只覆盖我们会用到的 6 种） |
+| `_InvalidArgs` | 内部异常 | 只在本模块里当"信号"用，对外**永远**变成 `INVALID_ARGS` |
+
+**核心设计决策（面试必问）**：**工具出错返回结构化错误，而不是抛异常把 loop 炸掉。**
+- loop 的天职是"根据观察再决策" —— **错误也是一种观察**：模型看到 `INVALID_ARGS: missing required args: ['qty']` 能自己补参数重试。
+- 但护栏在 agent 侧：同一工具连续失败 2 次就不再给它机会（`agent.py` 的护栏之二）。
+- 对照组：`register()` / `get()` 的错**照抛** —— 那是**配置错误**（写代码的人错了），必须在启动期暴露，不能伪装成"模型调用失败"。
+
+### ⑤ 完整参考实现（照抄）
+
 ```python
+"""工具注册表（P0-02 主体 §2）：工具的"身份证 + 检查站"。
+
+职责：① 注册工具 ② 把工具描述整理成给模型看的清单 ③ 在**执行前**校验参数。
+不关心工具内部怎么实现 —— executor 是别人写的函数，这里只判断"该不该让它跑"。
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from trace.tracer import record            # 钉子接口：trace 只走它
+
+STEP = "tool.invoke"                       # trace 步骤名（与 intent.extract 同一套命名）
+
+TOOL_NOT_FOUND = "TOOL_NOT_FOUND"          # 没有这个工具
+INVALID_ARGS = "INVALID_ARGS"              # 缺必填 / 类型错 / 多了不认识的键
+EXECUTOR_FAILED = "EXECUTOR_FAILED"        # 工具自己跑炸了（异常由这里接住）
+
+# 最小可用类型校验（不引 jsonschema 依赖，只覆盖我们工具会用到的类型）
+_TYPE_CHECKS: dict[str, Callable[[Any], bool]] = {
+    "string": lambda v: isinstance(v, str),
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "boolean": lambda v: isinstance(v, bool),
+    "array": lambda v: isinstance(v, list),
+    "object": lambda v: isinstance(v, dict),
+}
+
+
+class ToolNotFound(LookupError):
+    """get() 查未注册的工具 → 抛这个（配置错误，不是业务错误）。"""
+
+
+class _InvalidArgs(Exception):
+    """内部信号：参数不合法。只在本模块内部用，对外统一变成 INVALID_ARGS。"""
+
+
 @dataclass(frozen=True)
 class Tool:
-    name: str                      # 唯一，如 "create_purchase_flow"
-    description: str               # 给模型看：什么时候用它（写"何时用"，不是"是什么"）
-    parameters: dict               # JSON Schema（对象）
-    executor: Callable[..., Any]   # 真正干活的函数（第一个参数是 state 或显式参数）
-    side_effect: bool = False      # 有副作用的工具（建单/审批）标 True —— P0-03 的权限分级要用
+    name: str                              # 唯一名，如 "create_purchase_flow"
+    description: str                       # 给模型看：**何时用**（不是"是什么"）
+    parameters: dict[str, Any]             # JSON Schema（type=object）
+    executor: Callable[..., Any]           # 真活：签名统一 executor(state, **args) -> dict
+    side_effect: bool = False              # 建单/审批 = True；本卡不参与逻辑，P0-03 权限分级用
+
 
 class ToolRegistry:
-    def register(self, tool: Tool) -> None          # 重名 → 直接报错（静默覆盖是事故源）
-    def get(self, name: str) -> Tool                # 未注册 → ToolNotFound
-    def schemas(self) -> list[dict]                 # 给 LLM 的工具清单（{"name","description","parameters"}）
-    def invoke(self, name: str, args: dict, state: dict) -> dict
+    def __init__(self) -> None:
+        self._tools: dict[str, Tool] = {}
+
+    def register(self, tool: Tool) -> None:
+        if not tool.name or not tool.name.strip():
+            raise ValueError("tool name must not be blank")
+        if tool.name in self._tools:
+            raise ValueError(
+                f"duplicate tool name: {tool.name} (silently overwriting is how incidents start)")
+        if not isinstance(tool.parameters, dict) or tool.parameters.get("type") != "object":
+            raise ValueError(f"tool {tool.name}: parameters must be an object JSON Schema")
+        self._tools[tool.name] = tool
+
+    def get(self, name: str) -> Tool:
+        try:
+            return self._tools[name]
+        except KeyError as exc:
+            raise ToolNotFound(name) from exc
+
+    def schemas(self) -> list[dict[str, Any]]:
+        """给模型的工具清单：模型看到的就是我们校验时用的那份 schema。"""
+        return [{"name": t.name, "description": t.description, "parameters": t.parameters}
+                for t in self._tools.values()]
+
+    def invoke(self, name: str, args: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """固定四步：查表 → 校验 → 执行 → 记录。**永远返回 dict，永远不抛**。"""
+        started = time.perf_counter()
+        args = dict(args or {})                       # 模型可能给 None 或非 dict
+
+        tool = self._tools.get(name)                  # ① 查表
+        if tool is None:
+            return self._finish(name, args, state, started,
+                                error=(TOOL_NOT_FOUND, f"unknown tool: {name}"))
+
+        try:                                          # ② 校验参数
+            _validate_args(tool, args)
+        except _InvalidArgs as exc:
+            return self._finish(name, args, state, started, tool=tool,
+                                error=(INVALID_ARGS, str(exc)))
+
+        try:                                          # ③ 执行
+            data = tool.executor(state=state, **args)
+        except Exception as exc:                      # noqa: BLE001 —— 刻意的：错误也是观察
+            return self._finish(name, args, state, started, tool=tool,
+                                error=(EXECUTOR_FAILED, f"{type(exc).__name__}: {exc}"))
+
+        return self._finish(name, args, state, started, tool=tool, data=data)
+
+    @staticmethod
+    def _finish(name: str, args: dict[str, Any], state: dict[str, Any], started: float,
+                *, tool: "Tool | None" = None, error: tuple[str, str] | None = None,
+                data: Any = None) -> dict[str, Any]:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        if error is None:
+            result: dict[str, Any] = {"ok": True, "data": data}
+        else:
+            code, detail = error
+            result = {"ok": False, "error": {"code": code, "detail": detail, "tool": name}}
+
+        # ④ 记录：trace 失败绝不影响业务（tracer 内部已吞掉 OSError），trace_id 缺失也不崩
+        record(str((state or {}).get("trace_id") or "unknown"), STEP, {
+            "tool": name, "args": args, "ok": result["ok"],
+            "error_code": None if error is None else error[0],
+            "side_effect": None if tool is None else tool.side_effect,  # 查表失败时确实不知道
+            "duration_ms": duration_ms,
+        })
+        return result
+
+
+def _validate_args(tool: Tool, args: dict[str, Any]) -> None:
+    """按 Tool.parameters 做最小可用校验：缺必填 / 类型错 / enum 不符 / 多余键。"""
+    schema = tool.parameters
+    properties: dict[str, Any] = schema.get("properties") or {}
+
+    missing = [k for k in (schema.get("required") or []) if k not in args]
+    if missing:
+        raise _InvalidArgs(
+            f"missing required args: {missing} (allowed keys: {sorted(properties)})")
+
+    allow_extra = schema.get("additionalProperties") is True
+    unknown = [k for k in args if k not in properties]
+    if unknown and not allow_extra:
+        raise _InvalidArgs(f"unknown args: {unknown} (allowed keys: {sorted(properties)})")
+
+    for key, value in args.items():
+        spec = properties.get(key) or {}
+        expected = spec.get("type")
+        if expected in _TYPE_CHECKS and not _TYPE_CHECKS[expected](value):
+            raise _InvalidArgs(f"arg '{key}' must be {expected}, got {type(value).__name__}")
+        if spec.get("enum") is not None and value not in spec["enum"]:
+            raise _InvalidArgs(f"arg '{key}' must be one of {spec['enum']}, got {value!r}")
+        if isinstance(value, str) and value.strip() == "" and int(spec.get("minLength", 0)) >= 1:
+            raise _InvalidArgs(f"arg '{key}' must not be blank")
 ```
 
-**`invoke` 的固定四步（顺序不许换）**
-```
-1) 查表：没这个工具 → {"ok": False, "error": {"code": "TOOL_NOT_FOUND", ...}}
-2) 校验参数：缺必填/类型错 → {"ok": False, "error": {"code": "INVALID_ARGS", "detail": "..."}}
-3) 执行：try/except 包住 → {"ok": True, "data": ...} / {"ok": False, "error": {...}}
-4) 记录：tracer.record(...)（工具名、参数、耗时、成败）
-```
-**核心设计决策（面试会问）**：**工具出错返回结构化错误，而不是抛异常把 loop 炸掉。**
-- 因为 loop 的天职是"根据观察结果再决策" —— **错误也是一种观察**：模型看到 `INVALID_ARGS: qty 必须是正整数` 能自己改参数重试。
-- 但护栏在 agent 侧：同一工具连续失败 2 次 → 不再给它机会（见 agent.py）。
+### 自测（四种情况都要看到结构化结果、loop 不崩）
 
-**自测**：注册 1 个假工具（`echo`），验证 ① 正常调用 ② 缺参数 ③ 未注册 ④ 执行体抛异常 → 四种都能返回**结构化**结果且 loop 不崩。
+```powershell
+cd D:\Projects\interview-project\p2p-agent\python-service
+$env:PYTHONUTF8=1
+.\.venv\Scripts\python.exe -c "from harness.tool_registry import *; reg = ToolRegistry(); reg.register(Tool(name='echo', description='回显', parameters={'type':'object','properties':{'msg':{'type':'string'}},'required':['msg']}, executor=lambda state, msg: {'echo': msg})); print(reg.invoke('echo', {'msg':'hi'}, {'trace_id':'t1'})); print(reg.invoke('echo', {}, {'trace_id':'t1'})); print(reg.invoke('nope', {}, {'trace_id':'t1'}))"
+```
+**期望**：三条分别是 `{'ok': True, 'data': {'echo': 'hi'}}`、`{'ok': False, 'error': {'code': 'INVALID_ARGS', ...}}`、`{'ok': False, 'error': {'code': 'TOOL_NOT_FOUND', ...}}`，**都不抛异常**；
+`trace/t1.jsonl` 里应有 3 行 `step=tool.invoke`。
 
 ## 3. `harness/agent.py`（最小 ReAct 决策循环 —— 本卡心脏）
 
