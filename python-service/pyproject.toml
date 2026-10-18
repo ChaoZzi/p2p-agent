@@ -15,3 +15,8 @@ dev = [
 
 # 说明：本目录不是要发布的库，不写 [build-system]——
 # uv 会把它当"虚拟工程"（只装依赖、不装自身），省掉一层打包配置。
+
+[tool.pytest.ini_options]
+# tests/ 里要 import agents.* / llm.* / trace.*（都是 python-service 下的裸包）
+pythonpath = ["."]
+testpaths = ["tests"]
