@@ -463,29 +463,35 @@ class ToolRegistry:
     def invoke(self, name: str, args: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """固定四步：查表 → 校验 → 执行 → 记录。**永远返回 dict，永远不抛**。"""
         started = time.perf_counter()
-        args = dict(args or {})                       # 模型可能给 None 或非 dict
+        raw_args = args                                # 模型原样给的（trace 里要留证据）
+        args = args if isinstance(args, dict) else {}   # 非 dict 一律当空，绝不 dict(str) 炸掉
 
-        tool = self._tools.get(name)                  # ① 查表
+        tool = self._tools.get(name)                   # ① 查表
         if tool is None:
-            return self._finish(name, args, state, started,
+            return self._finish(name, raw_args, state, started,
                                 error=(TOOL_NOT_FOUND, f"unknown tool: {name}"))
 
-        try:                                          # ② 校验参数
+        if not isinstance(raw_args, dict):             # 模型给了字符串/列表/None → 结构化拒绝
+            return self._finish(name, raw_args, state, started, tool=tool,
+                                error=(INVALID_ARGS,
+                                       f"args must be an object (dict), got {type(raw_args).__name__}"))
+
+        try:                                           # ② 校验参数
             _validate_args(tool, args)
         except _InvalidArgs as exc:
             return self._finish(name, args, state, started, tool=tool,
                                 error=(INVALID_ARGS, str(exc)))
 
-        try:                                          # ③ 执行
+        try:                                           # ③ 执行
             data = tool.executor(state=state, **args)
-        except Exception as exc:                      # noqa: BLE001 —— 刻意的：错误也是观察
+        except Exception as exc:                       # noqa: BLE001 —— 刻意的：错误也是观察
             return self._finish(name, args, state, started, tool=tool,
                                 error=(EXECUTOR_FAILED, f"{type(exc).__name__}: {exc}"))
 
         return self._finish(name, args, state, started, tool=tool, data=data)
 
     @staticmethod
-    def _finish(name: str, args: dict[str, Any], state: dict[str, Any], started: float,
+    def _finish(name: str, args: Any, state: dict[str, Any], started: float,
                 *, tool: "Tool | None" = None, error: tuple[str, str] | None = None,
                 data: Any = None) -> dict[str, Any]:
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -499,7 +505,7 @@ class ToolRegistry:
         record(str((state or {}).get("trace_id") or "unknown"), STEP, {
             "tool": name, "args": args, "ok": result["ok"],
             "error_code": None if error is None else error[0],
-            "side_effect": None if tool is None else tool.side_effect,  # 查表失败时确实不知道
+            "side_effect": None if tool is None else tool.side_effect,
             "duration_ms": duration_ms,
         })
         return result
