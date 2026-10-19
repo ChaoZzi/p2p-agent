@@ -601,7 +601,8 @@ POST /api/chat（web/chat_api.py，dsh 写）
 | `action` | `"tool:<名字>"` 或 `"final"` | 模型 | **循环的唯一分支依据** | 空 → Pydantic 拒（`min_length=1`）；既不是 `tool:` 也不是 `final` → 记一行历史继续下一轮（不崩） |
 | `args` | 调工具的参数字典 | 模型（不可信） | 传给 `registry.invoke` | 非 dict → Pydantic 拒 → 纠错重试；缺必填 → 交给 registry 报 `INVALID_ARGS`（**双层护栏**） |
 | `reply` | final 时给用户的话 | 模型 | 反问 / 结果都在这里 | `final` 但没给 reply → 返回空字符串（前端会显示空白，P0-03 可加校验） |
-| **反问答疑** | 为什么句末问号就判 `need_more_info` | 见护栏 4 | 规格：**反问 = final 的一种** | 用结尾 `?/？` 判定是 P0-02 的简化；P0-03 改成模型显式给 `need` 字段 |
+| `need_more_info` | final 时**声明**"我这是在回问用户" | 模型（布尔） | `status` 判定的第一依据 | 缺省 `false`；模型忘了打旗 → 用"句末问号"兜底 |
+| **反问答疑** | 怎么判断"final 是反问还是结论" | 见护栏 4 | 规格：**反问 = final 的一种** | **两重判定**：`need_more_info=true` 或 句末 `?/？`。**实测反例**：模型常写"请补充成本中心，例如 CC-01。"（句号结尾）→ 只看问号会误判成 ok，所以必须加显式旗标 |
 
 **`AgentResult`（返回给调用方的四样东西）**
 
@@ -625,7 +626,7 @@ POST /api/chat（web/chat_api.py，dsh 写）
 | `last_tool` / `failures` | 上一个工具名 / 连续失败次数 | 护栏 2 的计数器；**换工具要重置**（不同工具各算各的） |
 | `work` | `dict(state)` 的副本 | 不改调用方对象；把 `trace_id` 塞进去给 registry 用 |
 
-### ⑤ 完整参考实现（已实跑 7 种场景）
+### ⑤ 完整参考实现（已实跑 8 种场景）
 
 ```python
 """最小 ReAct 决策循环（P0-02 主体 §3）—— 编排者，不是业务实现者。
@@ -657,7 +658,8 @@ BASE_SYSTEM = (
     "  thought: 一句话判断\n"
     '  action:  "tool:<工具名>" 调用工具；"final" 结束本轮\n'
     "  args:    调用工具的参数对象（action 为 final 时给 {}）\n"
-    "  reply:   action 为 final 时给用户看的话；若还需要用户补充信息，就在这里提问（以问号结尾）\n"
+    "  reply:   action 为 final 时给用户看的话\n"
+    "  need_more_info: 布尔；若你是在回问用户、要用户补充信息，填 true\n"
     "规则：\n"
     "1) 只能用工具清单里的工具，禁止编造工具名；\n"
     "2) 缺少必要信息时不要猜，用 final + 提问收尾；\n"
@@ -673,6 +675,7 @@ class Decision(pydantic.BaseModel):
     action: str = pydantic.Field(min_length=1)                   # "tool:<name>" 或 "final"
     args: dict[str, Any] = pydantic.Field(default_factory=dict)   # 调工具时的参数
     reply: str | None = None                                      # final 时给用户的话
+    need_more_info: bool = False        # final 时：我这是在回问用户（而不是给结论）
 
 
 @dataclass
@@ -704,7 +707,7 @@ def run(user_text: str, *, state: dict[str, Any], trace_id: str,
         if decision.action == "final":                                  # 护栏 4：反问也是 final
             reply = (decision.reply or "").strip()
             return AgentResult(reply=reply, state=work, tool_calls=tool_calls,
-                               status=_final_status(reply))
+                               status=_final_status(reply, decision.need_more_info))
 
         if not decision.action.startswith(TOOL_PREFIX):
             history.append(f"[round {round_no}] 非法 action={decision.action!r}: "
@@ -781,9 +784,13 @@ def _observation(result: dict[str, Any]) -> str:
     return text[:MAX_OBSERVATION_CHARS] + f"…[已截断，原始长度 {len(text)} 字符]"
 
 
-def _final_status(reply: str) -> str:
-    """反问 = final 的一种：以问号收尾就算 need_more_info（P0-03 可改成模型显式给 need 字段）。"""
-    return "need_more_info" if reply.endswith(("?", "？")) else "ok"
+def _final_status(reply: str, declared: bool) -> str:
+    """反问 = final 的一种。
+
+    判定两重：① 模型显式声明 need_more_info=True；② 兜底——以问号收尾也算。
+    为什么要兜底：实测模型常把问句写成"请补充成本中心，例如 CC-01。"（句号结尾），只看问号会误判成 ok。
+    """
+    return "need_more_info" if (declared or reply.endswith(("?", "？"))) else "ok"
 
 
 def _compact(value: Any) -> str:
@@ -795,18 +802,132 @@ def _known(state: dict[str, Any]) -> str:
     return _compact(keys) if keys else "（无）"
 ```
 
-### 实跑结果（7 种场景，替身 LLM + 真 registry）
+### 实跑结果（8 种场景，替身 LLM + 真 registry，不花钱不联网）
+
+| 场景 | status | 关键断言 |
+|---|---|---|
+| A 一轮 final | `ok` | 0 次工具调用 / 1 轮 |
+| B 工具 → 反问（问号结尾） | `need_more_info` | 1 次工具调用 / 2 轮；第 2 轮 prompt 含观察 + `[round 1]` 历史 |
+| C 模型两次输出都不合法 | `give_up` | 恰好问 2 次就停 |
+| D 同一工具连续失败 2 次 | `give_up` | `tool_calls` 两条都 `ok:false`，第 2 次后立刻收口 |
+| E 3 轮都在调工具 | `need_more_info` | 轮数用尽，`llm轮数=3` |
+| F 工具返回超长 | `ok` | 第 2 轮 prompt 含 `已截断`（观察段 2065 字符） |
+| G state | — | 调用方 `state` 未被修改；返回的 `state` 带 `trace_id` |
+| H **句号结尾 + 显式旗标** | `need_more_info` | 这就是"只看问号会误判"的反例，靠 `need_more_info=true` 救回 |
+
+### ⑥ 真实调用数据样本（v1.4：实际调用那一刻，参数长什么样）
+
+> **来源**：实跑（替身 LLM 返回脚本化 `raw`；registry 与 trace 都是真的）。命令见本节末。
+> 场景 = 用户第一句话 → agent 调 `extract_intent` → 发现缺成本中心 → 反问。
+
+**1) `run()` 的四个入参（真实值）**
+
+| 参数 | 真实数据 | 谁产生 |
+|---|---|---|
+| `user_text` | `"我想申请采购 1 台 MacBook Pro，给新来的前端用"` | 用户原话（`chat_api` 从 HTTP body 取） |
+| `state` | `{"session_id": "s-42", "turn": 1}` | `chat_api` 从内存 dict 取（**本轮还没有 trace_id**） |
+| `trace_id` | `"3f2a6c1e-9b44-4d7a-8c21-acde00000042"` | `chat_api` 用 `new_trace_id()`（uuid4）生成 |
+| `registry` | 见下面第 2 条：两个工具，每个含 `name/description/parameters/executor/side_effect` | 装配者（`chat_api.py`，dsh 写） |
+
+**2) `registry.schemas()` —— 模型看到的工具清单（真实、完整）**
+
+```json
+[
+  {"name": "extract_intent",
+   "description": "把用户一句话抽成结构化采购意图；信息不全时返回缺失字段清单",
+   "parameters": {"type": "object",
+                  "properties": {"text": {"type": "string", "minLength": 1}},
+                  "required": ["text"]}},
+  {"name": "create_purchase_flow",
+   "description": "用户信息齐全、要真正创建采购单时用（有副作用）",
+   "parameters": {"type": "object",
+                  "properties": {"item":        {"type": "string",  "minLength": 1},
+                                 "qty":         {"type": "integer", "minimum": 1, "maximum": 100},
+                                 "reason":      {"type": "string",  "minLength": 1},
+                                 "cost_center": {"type": "string",  "minLength": 1}},
+                  "required": ["item", "qty", "reason", "cost_center"]}}
+]
+```
+
+**3) 模型第 1 轮的真实输出（`_decide` 里的 `raw`，不可信的那一类）**
+
+```json
+{"thought": "先抽结构化意图",
+ "action": "tool:extract_intent",
+ "args": {"text": "我想申请采购 1 台 MacBook Pro，给新来的前端用"}}
+```
+
+**4) `complete_json` 实际收到的三个参数**
+
+`system`（前 400 字，真实）：
 
 ```
-[A 一轮final]   status=ok              reply='已建单，单号 F-1'                tool_calls=0 llm轮数=1
-[B 工具+反问]    status=need_more_info  reply='成本中心（cost_center）填什么？'     tool_calls=1 llm轮数=2
-                 第2轮 user 里含工具观察: True | 含 [round 1] 历史: True
-[C 解析失败x2]   status=give_up        （模型两次输出都不合法 → 转人工）        llm轮数=2
-[D 连败2次]      status=give_up        reply='create_purchase_flow 连续 2 次失败…' tool_calls=2
-[E 轮数用尽]     status=need_more_info  reply='达到最大轮数仍未完成…'            llm轮数=3
-[F 截断]         第2轮 user 里含'已截断': True（观察段 2065 字符）
-[G state]        调用方 state 未被修改: True | 返回的 state 带 trace_id: True
+你是企业采购流程的调度器。每一轮只输出一个 JSON 对象，字段：
+  thought: 一句话判断
+  action:  "tool:<工具名>" 调用工具；"final" 结束本轮
+  args:    调用工具的参数对象（action 为 final 时给 {}）
+  reply:   action 为 final 时给用户看的话
+  need_more_info: 布尔；若你是在回问用户、要用户补充信息，填 true
+规则：
+1) 只能用工具清单里的工具，禁止编造工具名；
+2) 缺少必要信息时不要猜，用 final + 提问收尾；
+3) 工具返回 ok=false 时读懂 error.detail：能补参数就补，不能就提问或放弃；
+4) 不要用同样的参数重复调用同一个工具。
+
+可用工具（JSON）：
+[ …第 2 条那份清单… ]
 ```
+
+`user`（第 1 轮，**完整**）：
+
+```
+用户本轮输入：
+我想申请采购 1 台 MacBook Pro，给新来的前端用
+```
+
+`schema`（`Decision.model_json_schema()`，真实）：`required = ["action"]`，`args` 是 `{"additionalProperties": true, "type": "object"}`，
+`reply` 是 `anyOf[string, null]`，`need_more_info` 是 `boolean`（默认 false）。
+
+**5) 第 2 轮 `user` —— 观察被回填进来的真实样子**
+
+```text
+用户本轮输入：
+我想申请采购 1 台 MacBook Pro，给新来的前端用
+
+此前的工具观察：
+[round 1] extract_intent({"text": "我想申请采购 1 台 MacBook Pro，给新来的前端用"}) -> {"ok": true, "data": {"intent": {"item": "MacBook Pro", "qty": 1, "reason": "新来的前端同事用"}, "missing": ["cost_center"]}}
+```
+
+**6) `registry.invoke` 的返回（就是上面那条观察的数据源）**
+
+```json
+{"ok": true,
+ "data": {"intent": {"item": "MacBook Pro", "qty": 1, "reason": "新来的前端同事用"},
+          "missing": ["cost_center"]}}
+```
+
+**7) 返回给 `chat_api` 的 `AgentResult`（真实）**
+
+```json
+{"reply": "请补充成本中心（cost_center），例如 CC-01。",
+ "state": {"session_id": "s-42", "turn": 1, "trace_id": "3f2a6c1e-9b44-4d7a-8c21-acde00000042"},
+ "tool_calls": [{"tool": "extract_intent",
+                 "args": {"text": "我想申请采购 1 台 MacBook Pro，给新来的前端用"},
+                 "ok": true, "round": 1}],
+ "status": "need_more_info"}
+```
+
+**8) 落盘的 trace（同一个 `trace_id`，3 行）**
+
+```json
+{"trace_id": "3f2a…0042", "step": "agent.run",  "payload": {"round": 1, "attempt": 1, "ok": true, "action": "tool:extract_intent", "thought": "先抽结构化意图"}}
+{"trace_id": "3f2a…0042", "step": "tool.invoke","payload": {"tool": "extract_intent", "args": {"text": "我想申请采购 1 台 MacBook Pro，给新来的前端用"}, "ok": true, "error_code": null, "side_effect": false, "duration_ms": 0}}
+{"trace_id": "3f2a…0042", "step": "agent.run",  "payload": {"round": 2, "attempt": 1, "ok": true, "action": "final", "thought": "缺成本中心，问用户"}}
+```
+
+> 对照要点：`state` 进来时**只有** `session_id/turn`，出去时多了 `trace_id`（agent 塞的）；
+> `tool_calls` 里的 `args` 与第 5 条观察里的 `args` 是**同一份**数据；`status` 由 `need_more_info` 旗标决定（第 7 条）。
+> 复跑方式：`python-service/` 下 `.venv\Scripts\python.exe`（`TRACE_DIR` 指到临时目录即可）。
 
 ## 4. 三者怎么串起来（对照 P0-02 演示脚本）
 
