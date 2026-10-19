@@ -549,47 +549,264 @@ $env:PYTHONUTF8=1
 
 ## 3. `harness/agent.py`（最小 ReAct 决策循环 —— 本卡心脏）
 
-**职责**：**"用户话 → 决策 → 执行 → 回填 → 再决策"** 的循环。它是编排者，不是业务实现者。
+> **本节按 v1.3 交付格式**：① 干嘛的 → ② 在请求哪一步 → ③ 与上下文的联系 → ④ 字段/变量逐条说明 → ⑤ 完整参考实现（7 种场景已实跑验证）。
+>
+> **动手前**：新建 `python-service/harness/agent.py`（同目录的 `__init__.py` 已存在）。不需要新依赖。
+>
+> **⚠ 一处对规格的有意修改**：原签名 `run(user_text, *, state, trace_id, max_rounds=3)` 里没有 registry ——
+> 实现改为 **`run(user_text, *, state, trace_id, registry, max_rounds=3)`**（registry 必填）。
+> 理由：**显式注入 > 模块级全局单例**（可测试：测试能塞假 registry；无隐式状态：谁装配谁负责）。
+> 装配者 = `web/chat_api.py`（`[dsh写]`）：把 `extract_intent`、`create_purchase_flow` 注册好后传进来。
 
-**规格**
+### ① 这段代码是干嘛的
+
+**"用户话 → 决策 → 执行 → 回填 → 再决策"的循环**。它是**编排者，不是业务实现者** —— 不认识采购单、不知道 HTTP、不写库；它只负责：问模型下一步做什么、把工具执行结果塞回去给模型看、并在模型跑偏时**踩刹车**。
+
+打比方：**包工头 + 安全带**。包工头不砌砖（工具才砌），他只决定"下一步谁上、干完的活儿回头看一眼"；安全带 = 四条护栏：轮数上限、同一工具连败即停、观察截断、反问也算一种收尾。
+
+### ② 它处在整个请求的哪一部分
+
+```
+POST /api/chat（web/chat_api.py，dsh 写）
+  └─ agent.run(user_text, state=会话state, trace_id, registry)   ← 你正在写的这个
+       ├─ 第1轮 决策 ──► tool:extract_intent ──► agents/intent.py（你写的，19 条测试）
+       ├─ 第2轮 决策 ──► final（反问）→ status=need_more_info
+       └─ 用户补答后 第1轮 决策 ──► tool:create_purchase_flow ──► tools/flow_client.py
+                                   └─► Java FlowService.createFlow（你写的，13 条验证测试）
+            第2轮 决策 ──► final（"已建单，单号 xxx"）→ status=ok
+```
+
+- **上游**：`web/chat_api.py` 收 HTTP、建 `trace_id`、取 / 存 `state`。
+- **下游**：只碰两样 —— `complete_json`（要决策）和 `registry.invoke`（要执行）。**不直接 import 任何业务工具**。
+- **没有它会怎样**：一次请求只能"问一次模型、干一件事"。用户说"买台笔记本" → 漏了成本中心，也没人能补问；工具报错后没有任何机制让模型改参数重试；模型跑飞了没人踩刹车（烧钱 + 死循环）。
+
+### ③ 它与上下文的联系
+
+| 关系 | 说明 |
+|---|---|
+| 入参 `user_text` | 用户本轮原话（**不是**整段对话；历史在 `history` 里，由本函数自己维护） |
+| 入参 `state` | 会话状态 dict（`chat_api` 存/取）。本函数**复制一份**再改（`work = dict(state)`），**绝不原地改调用方的对象** |
+| 入参 `trace_id` | 一个请求一个 uuid；写进 `work["trace_id"]` 让 `registry.invoke` 也能落 trace → **一次请求的 Python trace 与 Java 审计同 id** |
+| 入参 `registry` | 工具表（你上一段写的 `ToolRegistry`）。本文件**只调 `schemas()` 和 `invoke()`** |
+| 返回 `AgentResult` | 交给 `chat_api`：`reply` 回前端、`state` 存起来给下一轮、`tool_calls` 给页面侧栏、`status` 决定前端怎么显示 |
+| 与 `intent.py` 的关系 | **不直接调用**！`extract_intent` 是注册表里的一个工具（由装配者包装），所以 agent 保持"不认识业务" |
+
+### ④ 字段 / 变量逐条说明
+
+**`Decision`（模型每一轮必须产出的形状）**
+
+| 字段 | 是什么 | 值从哪来 | 为什么需要 | 不填 / 填错会怎样 |
+|---|---|---|---|---|
+| `thought` | 一句话判断 | 模型 | 排障时能看懂"它为什么这么走"；也进 trace | 缺省 `""`（可用）；写成长篇大论 → `max_length=500` 拦 |
+| `action` | `"tool:<名字>"` 或 `"final"` | 模型 | **循环的唯一分支依据** | 空 → Pydantic 拒（`min_length=1`）；既不是 `tool:` 也不是 `final` → 记一行历史继续下一轮（不崩） |
+| `args` | 调工具的参数字典 | 模型（不可信） | 传给 `registry.invoke` | 非 dict → Pydantic 拒 → 纠错重试；缺必填 → 交给 registry 报 `INVALID_ARGS`（**双层护栏**） |
+| `reply` | final 时给用户的话 | 模型 | 反问 / 结果都在这里 | `final` 但没给 reply → 返回空字符串（前端会显示空白，P0-03 可加校验） |
+| **反问答疑** | 为什么句末问号就判 `need_more_info` | 见护栏 4 | 规格：**反问 = final 的一种** | 用结尾 `?/？` 判定是 P0-02 的简化；P0-03 改成模型显式给 `need` 字段 |
+
+**`AgentResult`（返回给调用方的四样东西）**
+
+| 字段 | 是什么 | 谁消费 |
+|---|---|---|
+| `reply` | 给用户看的话（可能是反问） | `chat_api` → HTTP 响应 |
+| `state` | 更新后的会话状态 | `chat_api` 持久化；下一轮再传回来 |
+| `tool_calls` | 本轮调用记录 `[{tool,args,ok,round}]` | 页面侧栏 / 审计展示 |
+| `status` | `ok` / `need_more_info` / `give_up` | 前端决定"正常 / 追问 / 转人工"三种展示 |
+
+**常量与局部变量**
+
+| 名字 | 值 | 为什么 |
+|---|---|---|
+| `MAX_ROUNDS` | `3` | **护栏 1**：轮数上限（防死循环 + 防烧钱） |
+| `MAX_CONSECUTIVE_FAILURES` | `2` | **护栏 2**：同一工具连续失败 2 次 → 收口，不让模型瞎试 |
+| `MAX_OBSERVATION_CHARS` | `2000` | **护栏 3**：观察截断，防 token 爆炸（也是成本护栏） |
+| `TOOL_PREFIX` | `"tool:"` | action 前缀，避免和工具名混淆 |
+| `history` | 每轮追加一行 `[round n] 工具(参数) -> 观察` | 模型"记得"之前发生过什么；**不存整个 JSON**（省 token） |
+| `tool_calls` | 累积调用记录 | 返回给前端；也是"这轮干了什么"的证据 |
+| `last_tool` / `failures` | 上一个工具名 / 连续失败次数 | 护栏 2 的计数器；**换工具要重置**（不同工具各算各的） |
+| `work` | `dict(state)` 的副本 | 不改调用方对象；把 `trace_id` 塞进去给 registry 用 |
+
+### ⑤ 完整参考实现（已实跑 7 种场景）
+
 ```python
+"""最小 ReAct 决策循环（P0-02 主体 §3）—— 编排者，不是业务实现者。
+
+职责：用户话 → 决策 → 执行工具 → 把观察回填 → 再决策，直到 final / 轮数用尽 / 放弃。
+它不认识具体业务：所有工具都由调用方注入的 registry 提供。
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any
+
+import pydantic
+
+from harness.tool_registry import ToolRegistry
+from llm.deepseek import complete_json
+from trace.tracer import record
+
+STEP = "agent.run"
+TOOL_PREFIX = "tool:"
+MAX_ROUNDS = 3                      # 护栏 1：轮数上限（防死循环 + 防烧钱）
+MAX_CONSECUTIVE_FAILURES = 2        # 护栏 2：同一工具连续失败这么多次就收口
+MAX_OBSERVATION_CHARS = 2000        # 护栏 3：观察结果截断（防 token 爆炸）
+
+BASE_SYSTEM = (
+    "你是企业采购流程的调度器。每一轮只输出一个 JSON 对象，字段：\n"
+    "  thought: 一句话判断\n"
+    '  action:  "tool:<工具名>" 调用工具；"final" 结束本轮\n'
+    "  args:    调用工具的参数对象（action 为 final 时给 {}）\n"
+    "  reply:   action 为 final 时给用户看的话；若还需要用户补充信息，就在这里提问（以问号结尾）\n"
+    "规则：\n"
+    "1) 只能用工具清单里的工具，禁止编造工具名；\n"
+    "2) 缺少必要信息时不要猜，用 final + 提问收尾；\n"
+    "3) 工具返回 ok=false 时读懂 error.detail：能补参数就补，不能就提问或放弃；\n"
+    "4) 不要用同样的参数重复调用同一个工具。"
+)
+
+
+class Decision(pydantic.BaseModel):
+    """模型每一轮必须产出的形状（它的 model_json_schema() 会喂给模型）。"""
+
+    thought: str = pydantic.Field(default="", max_length=500)
+    action: str = pydantic.Field(min_length=1)                   # "tool:<name>" 或 "final"
+    args: dict[str, Any] = pydantic.Field(default_factory=dict)   # 调工具时的参数
+    reply: str | None = None                                      # final 时给用户的话
+
+
 @dataclass
 class AgentResult:
-    reply: str                 # 给用户看的话（可能是反问）
-    state: dict                # 更新后的会话状态（调用方负责持久化）
-    tool_calls: list[dict]     # 本轮的调用记录（页面侧栏/审计展示用）
-    status: str                # "ok" | "need_more_info" | "give_up"
+    reply: str                                   # 给用户看的话（可能是反问）
+    state: dict[str, Any]                        # 更新后的会话状态（调用方负责持久化）
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)   # 本轮调用记录（页面侧栏/审计）
+    status: str = "ok"                           # ok | need_more_info | give_up
 
-def run(user_text: str, *, state: dict, trace_id: str, max_rounds: int = 3) -> AgentResult
+
+def run(user_text: str, *, state: dict[str, Any], trace_id: str,
+        registry: ToolRegistry, max_rounds: int = MAX_ROUNDS) -> AgentResult:
+    """跑一次对话轮次。**永不抛**：任何失败都变成 status 里的结论。"""
+    work = dict(state or {})          # 不改调用方传进来的对象
+    work["trace_id"] = trace_id       # registry.invoke 靠它写 trace
+
+    history: list[str] = []           # 观察历史（拼进下一轮 prompt）
+    tool_calls: list[dict[str, Any]] = []
+    last_tool: str | None = None
+    failures = 0
+
+    for round_no in range(1, max_rounds + 1):
+        decision = _decide(user_text, registry, history, trace_id, round_no, work)
+        if decision is None:          # 两次都解析不出可用的决策
+            return AgentResult(
+                reply="抱歉，我没能把模型输出整理成可执行的决策（已重试一次），已转人工。",
+                state=work, tool_calls=tool_calls, status="give_up")
+
+        if decision.action == "final":                                  # 护栏 4：反问也是 final
+            reply = (decision.reply or "").strip()
+            return AgentResult(reply=reply, state=work, tool_calls=tool_calls,
+                               status=_final_status(reply))
+
+        if not decision.action.startswith(TOOL_PREFIX):
+            history.append(f"[round {round_no}] 非法 action={decision.action!r}: "
+                           f"只能是 {TOOL_PREFIX}<工具名> 或 final")
+            continue
+
+        name = decision.action[len(TOOL_PREFIX):].strip()
+        args = decision.args or {}
+        result = registry.invoke(name, args, work)                      # 不抛：registry 保证
+        tool_calls.append({"tool": name, "args": args,
+                           "ok": bool(result.get("ok")), "round": round_no})
+        history.append(f"[round {round_no}] {name}({_compact(args)}) -> {_observation(result)}")
+
+        if result.get("ok"):
+            last_tool, failures = name, 0
+            continue
+
+        failures = failures + 1 if name == last_tool else 1              # 护栏 2：连续失败计数
+        last_tool = name
+        if failures >= MAX_CONSECUTIVE_FAILURES:
+            detail = (result.get("error") or {}).get("detail", "")
+            return AgentResult(
+                reply=f"{name} 连续 {failures} 次失败，已停止重试：{detail}。请人工处理。",
+                state=work, tool_calls=tool_calls, status="give_up")
+
+    return AgentResult(                                                 # 护栏 1：轮数用尽
+        reply="达到最大轮数仍未完成。已确认的信息：" + _known(work) + "；请补充后重试。",
+        state=work, tool_calls=tool_calls, status="need_more_info")
+
+
+def _decide(user_text: str, registry: ToolRegistry, history: list[str],
+            trace_id: str, round_no: int, state: dict[str, Any]) -> Decision | None:
+    """问模型要一个决策；解析失败带着错误原文重试一次，再失败返回 None。"""
+    system = _system_for(registry)
+    user = _user_for(user_text, history, state)
+    feedback = ""
+
+    for attempt in (1, 2):
+        raw = complete_json(system, user + feedback, Decision.model_json_schema())
+        try:
+            decision = Decision.model_validate(raw)
+        except pydantic.ValidationError as exc:
+            feedback = (f"\n\n上次输出不合法，错误如下：\n{exc}\n"
+                        "请严格按 JSON Schema 重新输出，不要加解释文字。")
+            record(trace_id, STEP, {"round": round_no, "attempt": attempt,
+                                    "ok": False, "raw": raw, "validation_error": str(exc)})
+            continue
+        record(trace_id, STEP, {"round": round_no, "attempt": attempt, "ok": True,
+                                "action": decision.action, "thought": decision.thought})
+        return decision
+    return None
+
+
+def _system_for(registry: ToolRegistry) -> str:
+    """稳定前缀：角色 + 规则 + 工具清单（同一份 schema，模型看到的就是校验用的那份）。"""
+    return BASE_SYSTEM + "\n\n可用工具（JSON）：\n" + json.dumps(
+        registry.schemas(), ensure_ascii=False, indent=2)
+
+
+def _user_for(user_text: str, history: list[str], state: dict[str, Any]) -> str:
+    parts = ["用户本轮输入：\n" + user_text]
+    if state.get("intent"):
+        parts.append("已确认的意图：\n" + _compact(state["intent"]))
+    if history:
+        parts.append("此前的工具观察：\n" + "\n".join(history))
+    return "\n\n".join(parts)
+
+
+def _observation(result: dict[str, Any]) -> str:
+    """护栏 3：观察结果截断，并显式标注 —— 模型要知道自己看到的是残缺的。"""
+    text = json.dumps(result, ensure_ascii=False, default=str)
+    if len(text) <= MAX_OBSERVATION_CHARS:
+        return text
+    return text[:MAX_OBSERVATION_CHARS] + f"…[已截断，原始长度 {len(text)} 字符]"
+
+
+def _final_status(reply: str) -> str:
+    """反问 = final 的一种：以问号收尾就算 need_more_info（P0-03 可改成模型显式给 need 字段）。"""
+    return "need_more_info" if reply.endswith(("?", "？")) else "ok"
+
+
+def _compact(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)[:300]
+
+
+def _known(state: dict[str, Any]) -> str:
+    keys = {k: v for k, v in state.items() if k not in ("trace_id", "session_id")}
+    return _compact(keys) if keys else "（无）"
 ```
 
-**循环体（每轮固定动作）**
+### 实跑结果（7 种场景，替身 LLM + 真 registry）
+
 ```
-① 组装 messages：system（角色+规则，稳定） + 工具 schema（稳定） + 历史与观察（易变） + 本轮用户话
-② 决策：complete_json(...) → 必须返回 JSON：
-      {"thought": "...", "action": "tool:<name>" | "final", "args": {...} | "reply": "..."}
-③ 解析：解析失败 → 纠错重试一次；再失败 → status="give_up"（不要静默吞掉）
-④ action 是 tool: → registry.invoke(...) → 把结果作为 observation 追加进上下文 → 回到 ①
-   action 是 final → 结束，返回 reply
-⑤ 轮数用尽（max_rounds=3）→ status="need_more_info"，reply 说明"目前拿到什么、还差什么"
+[A 一轮final]   status=ok              reply='已建单，单号 F-1'                tool_calls=0 llm轮数=1
+[B 工具+反问]    status=need_more_info  reply='成本中心（cost_center）填什么？'     tool_calls=1 llm轮数=2
+                 第2轮 user 里含工具观察: True | 含 [round 1] 历史: True
+[C 解析失败x2]   status=give_up        （模型两次输出都不合法 → 转人工）        llm轮数=2
+[D 连败2次]      status=give_up        reply='create_purchase_flow 连续 2 次失败…' tool_calls=2
+[E 轮数用尽]     status=need_more_info  reply='达到最大轮数仍未完成…'            llm轮数=3
+[F 截断]         第2轮 user 里含'已截断': True（观察段 2065 字符）
+[G state]        调用方 state 未被修改: True | 返回的 state 带 trace_id: True
 ```
-
-**四条护栏（每一条都要能在代码里指出来）**
-1. **轮数上限**（3）：防死循环 + 防烧钱。
-2. **同一工具连续失败 2 次 → 强制收口**：不要再让模型瞎试，直接给出"信息不足/需要人工"的结果。
-3. **观察结果截断**（比如 2000 字符）：工具返回大了就截断并标注"已截断" —— 防 token 爆炸（这也是成本护栏的一部分）。
-4. **反问 = final 的一种**：`{"action":"final","reply":"成本中心（cost_center）填什么？"}` → `status="need_more_info"`，并把**已抽到的参数留在 state 里**（下次用户补答时接着用，不从头问）。
-
-**上下文分层（面试加分点）**
-- 稳定前缀（system + 工具 schema）在前、易变内容（观察/历史）在后 → 命中服务端的 prompt 缓存，省钱又快。
-- 别每轮把全部历史重新拼一遍长度爆炸的内容：只保留**最近 N 轮 + 关键状态摘要**。
-
-**面试追问预演**
-1. "为什么是'决策 → 执行 → 回填 → 再决策'，而不是一次生成全部步骤？" → **因为每步的结果会影响下一步**（工具会失败、会返回意料之外的值）。一次性生成=假设世界按剧本走；ReAct 把"世界的反馈"编进下一次决策。这是"Agent"和"脚本"的分界线。
-2. "loop 里谁保证安全？" → 四条护栏 + 工具层校验 + 意图层校验；**模型负责可能性，代码负责边界**。
-3. "怎么观测 loop 内部？" → 每轮落 trace JSONL（决策原文、参数、结果、耗时），配合 Java 侧同 trace_id 的审计 → 一条链路两端可对账。
-
----
 
 ## 4. 三者怎么串起来（对照 P0-02 演示脚本）
 
