@@ -13,6 +13,7 @@
 | 谁写哪个文件、**[你敲] 代码交付格式**、测试分工、commit 纪律 | `协作规范.md` |
 | 把一切串成一条线（面试复习主线 + 自测题 + 话术） | `串讲.md` |
 | 一次请求的链路图（浏览器打开，可折叠逐步看） | `assets/p0-01-flow.html`、`assets/p0-02-flow.html` |
+| **一次请求从入口到落库的完整链路（14 跳，含真实数据样本）** | **`assets/p0-02-request-chain.html`** |
 | 当前卡的规格（照着敲的教材） | `task-cards/`（状态表见 `task-cards/README.md`） |
 | 历史讲解 / 简报 / 审核证据 | `archive/`（索引见 `archive/README.md`） |
 | Java 契约快照（与运行实例 diff 一致） | `contracts/java-service-openapi.json` |

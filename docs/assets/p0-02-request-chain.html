@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>P0-02 一次建单请求的全链路</title>
+<style>
+  body { margin: 0; font-family: var(--app-font, system-ui), sans-serif; color: var(--foreground); }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted-foreground); font-size: 13px; margin-bottom: 18px; }
+  .grid { display: grid; grid-template-columns: 92px 1fr; gap: 0; }
+  .lane { display: flex; align-items: center; justify-content: center; font-size: 12px;
+          font-weight: 600; letter-spacing: .04em; writing-mode: vertical-rl; text-orientation: mixed;
+          border: 1px solid var(--border); border-bottom: none; padding: 8px 0;
+          background: var(--card); color: var(--muted-foreground); }
+  .lane.last { border-bottom: 1px solid var(--border); }
+  .row { border: 1px solid var(--border); border-bottom: none; padding: 12px 14px; }
+  .row.last { border-bottom: 1px solid var(--border); }
+  .n { display: inline-block; min-width: 22px; height: 22px; line-height: 22px; text-align: center;
+       border-radius: 11px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 700;
+       margin-right: 8px; }
+  .t { font-weight: 650; font-size: 14px; }
+  .where { color: var(--muted-foreground); font-size: 12px; margin: 3px 0 7px; font-family: ui-monospace, monospace; }
+  pre { margin: 0; padding: 8px 10px; border-left: 2px solid var(--border); background: var(--card);
+        font-size: 12px; line-height: 1.5; overflow-x: auto; white-space: pre-wrap; }
+  .tag { font-size: 11px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 10px;
+         color: var(--muted-foreground); margin-left: 6px; vertical-align: 2px; }
+  .todo { color: #b45309; border-color: #b45309; }
+  .ok   { color: #15803d; border-color: #15803d; }
+  .arrow { color: var(--muted-foreground); font-size: 12px; margin-left: 8px; }
+</style>
+</head>
+<body>
+<h1>一次「补答成本中心 → 建单成功」的全链路</h1>
+<div class="sub">P0-02 主体 · 14 跳 · 方括号里是真实数据（实跑样本）。文件路径都是仓库内真实路径。</div>
+
+<div class="grid">
+  <div class="lane">浏览器 / 前端</div>
+  <div class="row">
+    <div class="t"><span class="n">1</span>用户补答：<span class="arrow">“成本中心填 CC-01”</span></div>
+    <div class="where">页面侧栏显示上一轮的反问（status=need_more_info）</div>
+    <pre>{"session_id": "s-42", "message": "成本中心填 CC-01"}</pre>
+  </div>
+
+  <div class="lane">Python · L0</div>
+  <div class="row">
+    <div class="t"><span class="n">2</span>web/chat_api.py 收到 POST /api/chat <span class="tag todo">[dsh写·未落地]</span></div>
+    <div class="where">python-service/web/chat_api.py · chat(req)</div>
+    <pre>trace_id = new_trace_id()                  # "56f75efb-6692-4caa-996b-5ffc3eb4cb48"
+state    = _sessions.get("s-42", {})       # {"session_id":"s-42","intent":{...},"trace_id":"上一轮"}
+result   = agent.run(req.message, state=state, trace_id=trace_id, registry=REGISTRY)</pre>
+  </div>
+
+  <div class="lane">Python · L1</div>
+  <div class="row">
+    <div class="t"><span class="n">3</span>harness/agent.py 第 1 轮：问模型要决策 <span class="tag todo">[你敲·进行中]</span></div>
+    <div class="where">agent.run → _decide → llm/deepseek.py::complete_json(system, user, Decision schema)</div>
+    <pre>模型返回(raw)：
+{"thought":"信息齐全，可以建单","action":"tool:create_purchase_flow",
+ "args":{"item":"MacBook Pro","qty":1,"reason":"新来的前端同事用","cost_center":"CC-01"}}</pre>
+  </div>
+
+  <div class="row">
+    <div class="t"><span class="n">4</span>第 1 轮：调工具前的检查站 <span class="tag ok">[✅ 28 条已验]</span></div>
+    <div class="where">harness/tool_registry.py::invoke(name, args, state)</div>
+    <pre>① 查表 create_purchase_flow ✓   ② 校验 item/qty/reason/cost_center ✓
+③ executor(state=state, item="MacBook Pro", qty=1, reason="…", cost_center="CC-01")
+④ trace 一行：{"step":"tool.invoke","ok":true,"side_effect":true,"duration_ms":12.4}</pre>
+  </div>
+
+  <div class="lane">Python · L3</div>
+  <div class="row">
+    <div class="t"><span class="n">5</span>tools/flow_client.py 发 HTTP 给 Java</div>
+    <div class="where">flow_client.py::create_flow(request_id=…, item=…, qty=…, reason=…, cost_center=…, trace_id=…)</div>
+    <pre>POST http://127.0.0.1:8000/api/flows
+X-Trace-Id: 56f75efb-6692-4caa-996b-5ffc3eb4cb48
+X-Request-Id: req-ccbec347
+{"request_id":"req-ccbec347","item":"MacBook Pro","qty":1,
+ "reason":"新来的前端同事用","cost_center":"CC-01"}</pre>
+  </div>
+
+  <div class="lane">Java · 过滤器</div>
+  <div class="row">
+    <div class="t"><span class="n">6</span>TraceFilter 进门第一站 <span class="tag ok">[✅ 已完成]</span></div>
+    <div class="where">java-service/…/mockoa/web/TraceFilter.java · @Order(HIGHEST_PRECEDENCE)</div>
+    <pre>incoming = request.getHeader("X-Trace-Id")   # 校验 uuid 形状；缺失才生成
+MDC.put("traceId", traceId)                  # 之后每行日志自动带 [trace=…]
+response.setHeader("X-Trace-Id", traceId)    # 原样回显 —— Python 侧会断言这一点</pre>
+  </div>
+
+  <div class="lane">Java · Web</div>
+  <div class="row">
+    <div class="t"><span class="n">7</span>FlowController 形状级校验（不做业务判断）<span class="tag ok">[✅]</span></div>
+    <div class="where">java-service/…/web/FlowController.java · @PostMapping</div>
+    <pre>body 非空 ✓ | body.request_id 非空 ✓ | X-Request-Id 头存在 ✓ | 头 == body.request_id ✓
+item 非空 ✓ | qty ≥ 1 ✓ | reason 非空 ✓ | cost_center 非空 ✓
+→ CreateFlowCommand(item, qty, reason, costCenter)
+→ flowService.createFlow(body.request_id().trim(), command)   # ①4 个方法都是 public</pre>
+  </div>
+
+  <div class="lane">Java · 编排</div>
+  <div class="row">
+    <div class="t"><span class="n">8</span>FlowService.createFlow 五步（@Transactional 一个事务）<span class="tag ok">[✅ 13 条已验]</span></div>
+    <div class="where">java-service/…/engine/FlowService.java</div>
+    <pre>步骤1 幂等查单   findByRequestId("req-ccbec347") → 空 → 继续
+步骤2 插入       insertFlowIfAbsent(view)            → 影响 1 行（DRAFT）
+              └ audit(FLOW_CREATED, detail={"item":"MacBook Pro","qty":1})
+步骤3 DRAFT→SUBMITTED            transit() 校验 → updateStateIfCurrent 影响 1 行 → audit(SUBMITTED)
+步骤4 SUBMITTED→PENDING_APPROVAL transit() 校验 → updateStateIfCurrent 影响 1 行 → audit(APPROVAL_REQUESTED)
+步骤5 回库重读   getFlow(id)                          → 返回库里的真相</pre>
+  </div>
+
+  <div class="lane">Java · 持久层</div>
+  <div class="row">
+    <div class="t"><span class="n">9</span>FlowRepository / AuditService 落库</div>
+    <div class="where">db/FlowRepository.java（flow 表）· engine/AuditService.java → db/AuditRepository.java（audit_log 表）</div>
+    <pre>INSERT INTO flow(id, request_id, state, item, qty, reason, cost_center, created_at, updated_at)
+VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(request_id) DO NOTHING      -- 幂等：冲突则影响 0 行
+INSERT INTO audit_log(audit_id, flow_id, actor, action, detail, trace_id, at) VALUES (…)
+   ├─ actor="system", action=FLOW_CREATED,         trace_id=X-Trace-Id（同一次请求）
+   ├─ actor="system", action=SUBMITTED
+   └─ actor="system", action=APPROVAL_REQUESTED</pre>
+  </div>
+
+  <div class="lane">DB</div>
+  <div class="row">
+    <div class="t"><span class="n">10</span>SQLite/PostgreSQL 落盘结果</div>
+    <div class="where">SQLite: java-service/data/mock-oa.db ｜ PG: p2p_agent 库（REVOKE UPDATE,DELETE ON audit_log）</div>
+    <pre>flow      1 行   state=PENDING_APPROVAL  ← 建单后直接待审批
+audit_log 3 行   三条 trace_id 完全相同 = 56f75efb…
+            at: .073380100Z / .076860500Z / .076860500Z  ← 后两行同微秒（并列！）
+（approve 之后会变 5 行，reject 之后 4 行 —— 这是审计基线）</pre>
+  </div>
+
+  <div class="lane">Java · 返回</div>
+  <div class="row">
+    <div class="t"><span class="n">11</span>HTTP 200 + FlowView（snake_case 契约）</div>
+    <div class="where">FlowController 直接返回 record FlowView；异常走 GlobalExceptionHandler</div>
+    <pre>200  {"id":"cb0b3daa-…","request_id":"req-ccbec347","state":"PENDING_APPROVAL",
+      "item":"MacBook Pro","qty":1,"reason":"新来的前端同事用","cost_center":"CC-01",
+      "created_at":"2026-10-19T12:48:04.068514Z","updated_at":"2026-10-19T12:48:04.076860500Z"}
+错误  {"error":{"code":"FLOW_STATE_CONFLICT","message":"…","trace_id":"56f75efb…"}}</pre>
+  </div>
+
+  <div class="lane">Python · L3</div>
+  <div class="row">
+    <div class="t"><span class="n">12</span>flow_client 校验回显并返回</div>
+    <div class="where">tools/flow_client.py::_request → _payload</div>
+    <pre>非 2xx → 抛 ContractError(409, "FLOW_STATE_CONFLICT", …)  ← 上层可据此决策
+回显校验：response.headers["X-Trace-Id"] == 发出的 trace_id ✓（不等就抛 TracePropagationError）
+返回 dict：{"id":"cb0b3daa-…","state":"PENDING_APPROVAL", …}</pre>
+  </div>
+
+  <div class="lane">Python · L1</div>
+  <div class="row">
+    <div class="t"><span class="n">13</span>agent 第 2 轮：观察回填 → final</div>
+    <div class="where">agent.run → _observation(result) 拼进 user → _decide</div>
+    <pre>user 里多了一段：
+此前的工具观察：
+[round 1] create_purchase_flow({...}) -> {"ok":true,"data":{"id":"cb0b3daa-…","state":"PENDING_APPROVAL"}}
+模型返回：{"thought":"建单成功","action":"final","need_more_info":false,
+          "reply":"已建单，单号 cb0b3daa-…，当前状态待审批。"}
+→ AgentResult(status="ok")</pre>
+  </div>
+
+  <div class="lane last">Python · L0</div>
+  <div class="row last">
+    <div class="t"><span class="n">14</span>chat_api 回前端 + 存 state</div>
+    <div class="where">python-service/web/chat_api.py · 返回 ChatResponse</div>
+    <pre>_sessions["s-42"] = result.state          # 下一轮接着用（含 trace_id）
+{"reply":"已建单，单号 cb0b3daa-…，当前状态待审批。","status":"ok",
+ "session_id":"s-42","trace_id":"56f75efb-6692-4caa-996b-5ffc3eb4cb48",
+ "tool_calls":[{"tool":"create_purchase_flow","ok":true,"round":1}]}</pre>
+  </div>
+</div>
+
+<div class="sub" style="margin-top:16px; border-left: 2px solid #b45309; padding-left: 10px">
+  ⚠ <b>实跑发现（2026-10-19）</b>：<code>SUBMITTED</code> 与 <code>APPROVAL_REQUESTED</code> 的 <code>at</code> 完全相同 →
+  <code>ORDER BY at</code> 并列时顺序不确定（本次接口返回的顺序就反了）。修法见 <code>docs/进度.md §已知问题</code>。
+</div>
+<div class="sub" style="margin-top:16px">
+  落盘对账（同一个 trace_id 串起两个进程、两种存储）：<br>
+  · Python：<code>trace/&lt;trace_id&gt;.jsonl</code> —— agent.run 每轮 1 行 + tool.invoke 1 行<br>
+  · Java：控制台日志每行带 <code>[trace=…]</code>；<code>audit_log</code> 3 行的 <code>trace_id</code> 列 = 同一个值<br>
+  · DB：<code>flow</code> 1 行、<code>audit_log</code> 3 行（approve 后 5 行 / reject 后 4 行）
+</div>
+</body>
+</html>
