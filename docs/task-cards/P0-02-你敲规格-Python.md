@@ -685,6 +685,11 @@ class AgentResult:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)   # 本轮调用记录（页面侧栏/审计）
     status: str = "ok"                           # ok | need_more_info | give_up
 
+# run() 的四个入参（真实值）：
+#   user_text  用户原话（chat_api 从 HTTP body 取）
+#   state      {"session_id": "s-42", "turn": 1} —— chat_api 从内存 dict 取；本轮还没有 trace_id
+#   trace_id   uuid4 字符串，chat_api 用 new_trace_id() 生成
+#   registry   两个工具，每个含 name/description/parameters/executor/side_effect（装配者 chat_api.py，dsh 写）
 
 def run(user_text: str, *, state: dict[str, Any], trace_id: str,
         registry: ToolRegistry, max_rounds: int = MAX_ROUNDS) -> AgentResult:
@@ -723,6 +728,9 @@ def run(user_text: str, *, state: dict[str, Any], trace_id: str,
 
         if result.get("ok"):
             last_tool, failures = name, 0
+            data = result.get("data") or {}          # 工具成功的返回（dict）
+            if isinstance(data, dict) and data.get("intent"):
+                work["intent"] = data["intent"]      # ★ 已确认的意图必须留在 state 里，见下方说明
             continue
 
         failures = failures + 1 if name == last_tool else 1              # 护栏 2：连续失败计数
@@ -802,7 +810,25 @@ def _known(state: dict[str, Any]) -> str:
     return _compact(keys) if keys else "（无）"
 ```
 
-### 实跑结果（8 种场景，替身 LLM + 真 registry，不花钱不联网）
+#### 为什么 `state` 里要留 `intent`（2026-10-22 修正 —— 规格作者的错）
+
+`_user_for` 里有个 `if state.get("intent")` 分支，但 v1.4 的参考实现**没有任何一行往 state 写 intent**
+（`git log -S 'work["intent"]' --all` 为空 → 从引入那天起就是死分支），§4 那句"state 里留下已抽到的
+item/qty/reason"也是假的。后果：用户补答走的是**第二个 HTTP 请求**，`chat_api` 只能给出 `result.state`，
+拿不到上一轮的 item/qty/reason，模型于是重抽或重问一遍。
+
+修法就是 `run()` 里那 3 行：工具 `ok` 且 `data.intent` 存在 → 写进 `work["intent"]`。三个边界：
+
+- **为什么只留 `intent`，不把整个 `data` 塞进 state**：`data` 里的 `missing` 只对当轮有用；state 是要跨请求
+  传、要落库的，只留业务上要接着用的那部分。
+- **为什么放在 `if result.get("ok")` 里**：失败的工具没有 `data`，把 `None`/空写进 state 会变成"已确认"的假象。
+- **为什么第 2 轮 `history` 是空的**：`history` 是**本轮内**的观察（跨请求不能靠它），所以跨轮只能靠 `state`。
+
+回归用例：`python-service/tests/test_agent_verify.py::test_intent_is_kept_in_state_after_extract` +
+`::test_second_turn_prompt_carries_confirmed_intent` + `::test_second_turn_creates_flow_with_carried_intent`
+（三条都不看实现细节，只看 state / prompt / 工具实参）。
+
+### 实跑结果（9 种场景，替身 LLM + 真 registry，不花钱不联网）
 
 | 场景 | status | 关键断言 |
 |---|---|---|
@@ -814,6 +840,7 @@ def _known(state: dict[str, Any]) -> str:
 | F 工具返回超长 | `ok` | 第 2 轮 prompt 含 `已截断`（观察段 2065 字符） |
 | G state | — | 调用方 `state` 未被修改；返回的 `state` 带 `trace_id` |
 | H **句号结尾 + 显式旗标** | `need_more_info` | 这就是"只看问号会误判"的反例，靠 `need_more_info=true` 救回 |
+| I **跨轮承接**（2026-10-22 补） | 第 1 轮 `need_more_info` / 第 2 轮 `ok` | 跑两次 `run()`：第 1 轮 `extract_intent` 成功后 `result.state["intent"]` 存在；第 2 轮（state 承接）第 1 次问模型的 prompt 含 `已确认的意图` + `MacBook Pro`；`create_purchase_flow` 拿到 4 个实参 |
 
 ### ⑥ 真实调用数据样本（v1.4：实际调用那一刻，参数长什么样）
 
@@ -925,9 +952,56 @@ def _known(state: dict[str, Any]) -> str:
 {"trace_id": "3f2a…0042", "step": "agent.run",  "payload": {"round": 2, "attempt": 1, "ok": true, "action": "final", "thought": "缺成本中心，问用户"}}
 ```
 
-> 对照要点：`state` 进来时**只有** `session_id/turn`，出去时多了 `trace_id`（agent 塞的）；
-> `tool_calls` 里的 `args` 与第 5 条观察里的 `args` 是**同一份**数据；`status` 由 `need_more_info` 旗标决定（第 7 条）。
-> 复跑方式：`python-service/` 下 `.venv\Scripts\python.exe`（`TRACE_DIR` 指到临时目录即可）。
+**9) 跨轮承接（第 2 轮）—— 2026-10-22 修正后实跑的真实值**
+
+场景：第 1 轮 `run()` 反问后，`chat_api` 做 `_sessions["s-42"] = result.state`；用户补答"成本中心填 CC-01"，第 2 轮 `run()` 带着这份 state 进来。
+
+第 1 轮返回（注意 `state` 里多了 `intent`）：
+
+```json
+{"reply": "请补充成本中心（cost_center），例如 CC-01。",
+ "state": {"session_id": "s-42", "turn": 1,
+           "trace_id": "4bbb0c68-5b45-463e-9982-fe5bb2e90cf1",
+           "intent": {"item": "MacBook Pro", "qty": 1, "reason": "新来的前端同事用"}},
+ "tool_calls": [{"tool": "extract_intent",
+                 "args": {"text": "我想申请采购 1 台 MacBook Pro，给新来的前端用"},
+                 "ok": true, "round": 1}],
+ "status": "need_more_info"}
+```
+
+第 2 轮第 1 次问模型的 `user`（完整、真实）——`已确认的意图` 这一段就是 `_user_for` 里那个 `state.get("intent")` 分支的产出：
+
+```text
+用户本轮输入：
+成本中心填 CC-01
+
+已确认的意图：
+{"item": "MacBook Pro", "qty": 1, "reason": "新来的前端同事用"}
+```
+
+第 2 轮返回 + 建单工具收到的实参：
+
+```json
+{"reply": "已建单，单号 cb0b3daa-5f8e-4b2a-9d1c-0f0e9a7b41aa，当前状态待审批。",
+ "state": {"session_id": "s-42", "turn": 1,
+           "trace_id": "5a092190-45a3-4916-8ec1-1c78fc8dc792",
+           "intent": {"item": "MacBook Pro", "qty": 1, "reason": "新来的前端同事用"}},
+ "tool_calls": [{"tool": "create_purchase_flow",
+                 "args": {"item": "MacBook Pro", "qty": 1,
+                          "reason": "新来的前端同事用", "cost_center": "CC-01"},
+                 "ok": true, "round": 1}],
+ "status": "ok"}
+```
+
+反向对照（**没写 `work["intent"] = ...` 的版本**，同样脚本实跑）：第 1 轮返回的 `state` 只有
+`{"session_id","turn","trace_id"}`，第 2 轮 prompt 只有一行 `用户本轮输入：\n成本中心填 CC-01` ——
+模型看不到 item/qty/reason，只会再抽一次或再问一遍。
+
+> 对照要点：`state` 进来时**只有** `session_id/turn`，出去时多了 `trace_id`（agent 塞的）和
+> `intent`（工具成功后 agent 塞的）；`tool_calls` 里的 `args` 与第 5 条观察里的 `args` 是**同一份**数据；
+> `status` 由 `need_more_info` 旗标决定（第 7 条）。
+> 复跑方式：`python-service/` 下 `.venv\Scripts\python.exe`（`TRACE_DIR` 指到临时目录即可）；
+> 跨轮这条另有自动化用例：`python-service/tests/test_agent_verify.py`（Hermes 写的 18 条独立验证）。
 
 ## 4. 三者怎么串起来（对照 P0-02 演示脚本）
 
@@ -938,7 +1012,7 @@ def _known(state: dict[str, Any]) -> str:
       ├─ 决策：action=tool:extract_intent → intent.extract()
       │     返回 (intent, missing=["cost_center"])
       ├─ 决策：action=final（反问）→ reply="成本中心填什么？"  status=need_more_info
-      └─ state 里留下已抽到的 item/qty/reason
+      └─ state 里留下 intent（item/qty/reason，agent 在工具成功后写回）+ trace_id
 用户："成本中心填 DEV-01"
   → agent.run(state 承接上轮)
       ├─ 决策：action=tool:create_purchase_flow → registry.invoke → tools/flow_client → Java POST /api/flows
@@ -953,7 +1027,7 @@ def _known(state: dict[str, Any]) -> str:
 |---|---|---|
 | 1 | `agents/intent.py` | 三句真话：完整句 / 缺成本中心 / 数量非法（"买 -3 台"）→ 看返回与缺失列表 |
 | 2 | `harness/tool_registry.py` | 假工具 echo 的四种调用（正常/缺参/未注册/执行体抛异常） |
-| 3 | `harness/agent.py` | 用假工具跑通：一轮出结果 / 两轮（先工具后 final）/ 触发轮数上限 |
+| 3 | `harness/agent.py` | 用假工具跑通：一轮出结果 / 两轮（先工具后 final）/ 触发轮数上限 / **跑两次 `run()` 看第 2 轮 prompt 里有没有 `已确认的意图`** |
 
 **写之前先把这 3 条问自己**（能答上来再动手，比写完再想省一半时间）：
 1. 如果模型返回的 JSON 少了一个字段，我的代码在哪一行兜住它？
