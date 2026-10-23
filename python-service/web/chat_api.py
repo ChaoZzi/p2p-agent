@@ -150,7 +150,7 @@ def _exec_create_purchase_flow(
     request_id = "req-" + hashlib.sha1(
         f'{current.get("session_id")}|{item}|{qty}|{reason}|{cost_center}'.encode()
     ).hexdigest()[:8]
-    return create_flow(
+    created = create_flow(
         request_id=request_id,
         item=item,
         qty=qty,
@@ -158,9 +158,15 @@ def _exec_create_purchase_flow(
         cost_center=cost_center,
         trace_id=trace_id,
     )
+    FLOW_BY_REQUEST[request_id] = created  # 演示页按 request_id 反查 flow_id（审批要用）
+    return created
 
 
 REGISTRY = ToolRegistry()  # 模块级装配一次：重复装配会撞 duplicate tool name
+#: 演示页用：request_id（幂等键，形如 req-6ab8c4ec）→ 建单返回的 FlowView。
+#: 模型回复里通常复述 request_id，而审批要用 flow.id（另一个 UUID），页面靠这张表反查。
+#: 与 `_sessions` 同生命周期：单进程内存，重启即清。
+FLOW_BY_REQUEST: dict[str, dict[str, Any]] = {}
 REGISTRY.register(Tool(
     name="extract_intent",
     description="把用户一句话抽成结构化采购意图；信息不全时返回缺失字段清单",
