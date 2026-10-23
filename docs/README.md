@@ -15,6 +15,7 @@
 | 一次请求的链路图（浏览器打开，可折叠逐步看） | `assets/p0-01-flow.html`、`assets/p0-02-flow.html` |
 | **一次请求从入口到落库的完整链路（14 跳，含真实数据样本）** | **`assets/p0-02-request-chain.html`** |
 | 当前卡的规格（照着敲的教材） | `task-cards/`（状态表见 `task-cards/README.md`） |
+| **本地演示页（对话 → 建单 → 审批 → 审计回放）** | **`http://127.0.0.1:8001/`**（先起 Java :8000 + `python-service/main.py`；页面源文件 `python-service/web/static/index.html`） |
 | 历史讲解 / 简报 / 审核证据 | `archive/`（索引见 `archive/README.md`） |
 | Java 契约快照（与运行实例 diff 一致） | `contracts/java-service-openapi.json` |
 

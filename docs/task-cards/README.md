@@ -4,9 +4,10 @@
 |---|---|---|
 | **P0-01** 契约先行冒烟 | ✅ 已完成并验收 | 卡/简报/讲解已归档：`../archive/P0-01-smoke.md`、`../archive/P0-01-dsh-brief.md`、`../archive/P0-01-讲解.md` |
 | **P0-02 §0** 存储双 profile 改造 | ✅ 已完成并审核通过 | 简报 `../archive/P0-02-dsh-brief-section-0.md`、讲解 `../archive/P0-02-讲解.md` |
-| **P0-02 主体**（最小闭环） | 🔄 进行中 | 卡 `../archive/P0-02-min-loop.md`、dsh 简报 `../archive/P0-02-dsh-brief-main.md`、阶段 A 讲解 `../archive/P0-02-主体-讲解.md` |
+| **P0-02 主体**（最小闭环） | ✅ 已完成（端到端真跑 + 演示页，2026-10-23） | 卡 `../archive/P0-02-min-loop.md`、dsh 简报 `../archive/P0-02-dsh-brief-main.md`、阶段 A 讲解 `../archive/P0-02-主体-讲解.md` |
 | ├─ 阶段 B · **Java 侧** 4 个 [你敲] 文件 | ✅ 已完成（`e43363d` by 你）+ 独立验证（`f878b75` by Hermes） | 规格 **`P0-02-你敲规格-Java.md`**（留作对照 / 面试复习） |
-| └─ 阶段 B · **Python 侧** 3 个 [你敲] 文件 | ⬜ **未开工 ← 当前这一步** | 规格 **`P0-02-你敲规格-Python.md`** |
+| ├─ 阶段 B · **Python 侧** 3 个 [你敲] 文件 | ✅ 已完成：L1 `agent`（`8e98ede` + 18 条验证 `eaf6a09`）、L2 `tool_registry`（28 条）、L3 `intent`（19 条） | 规格 **`P0-02-你敲规格-Python.md`** |
+| └─ **L0 入口**（dsh：`chat_api` + `main`；Hermes：`flow_proxy` + 演示页） | ✅ 已完成并验收（`5b6b5ca` + 30 条 `098d46b`；演示页 14 条） | 卡 `P0-02-dsh-任务卡-chat_api.md`、讲解 `讲解-chat_api.md` |
 | **P0-03** P2P 主链路（预算 / 下单 / 付款 + `flow_step`） | ⬜ 未开始 | 待写卡 |
 
 ## 规则
